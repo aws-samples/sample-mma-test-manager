@@ -75,6 +75,6 @@ kiro-cli chat --agent mma-agent
 ## Documentation
 - Lab instructions from MMA Workshop
   - [Oracle to PostgreSQL](https://catalog.workshops.aws/mma-oracle-pg/en-US/6-modernization-validation/test-manager)
-  - [SQL Server to PostgreSQL](https://catalog.workshops.aws/mma-mssql-pg/en-US/module-4)
+  - [SQL Server to PostgreSQL](https://catalog.workshops.aws/mma-mssql-pg/en-US/test-manager)
 - Individual server READMEs in each MCP directory
 
