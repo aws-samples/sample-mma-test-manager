@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="_csrf" th:content="${_csrf.token}"/>
+    <meta name="_csrf_header" th:content="${_csrf.headerName}"/>
+    <title>Comparison Test - MMA Test Manager</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+    <style>
+        .sql-box { background: #1e293b; color: #e2e8f0; padding: 15px; font-family: 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; border-radius: 5px; margin: 10px 0; max-height: 300px; overflow-y: auto; }
+        .test-row { background: white; padding: 15px; margin-bottom: 15px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .test-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .test-actions { display: flex; gap: 5px; }
+        .icon-btn { padding: 4px; border: none; background: transparent; cursor: pointer; transition: all 0.2s; border-radius: 4px; }
+        .icon-btn:hover { transform: scale(1.1); opacity: 0.8; }
+        .icon-btn img { width: 28px; height: 28px; display: block; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1><img th:src="@{/images/comparison-test.png}" alt="Comparison Test" style="width: 32px; height: 32px; vertical-align: middle;"> Comparison Test</h1>
+            <div class="header-nav">
+                <a th:href="@{/project/{id}(id=${object.projectId})}" class="btn btn-secondary btn-sm">← Back to Project</a>
+                <form method="post" th:action="@{/logout}" style="display: inline;">
+                    <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <div class="object-info" style="background: #f9fafb; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <div><strong>Source:</strong> (<span th:text="${object.sourceObjectType}"></span>)
+                <span th:text="${object.sourceSchemaName}"></span>.<span th:if="${object.sourcePackageName != null and !object.sourcePackageName.isEmpty()}" th:text="${object.sourcePackageName + '.'}"></span><span th:text="${object.sourceObjectName}"></span></div>
+                <div><strong>Target:</strong> (<span th:text="${object.targetObjectType != null ? object.targetObjectType : object.sourceObjectType}"></span>) <span th:text="${object.targetSchemaName}"></span>.<span th:text="${object.targetObjectName}"></span></div>
+            </div>
+            
+            <div style="margin-bottom: 20px;">
+                <button class="btn btn-primary" th:onclick="'generateTests(' + ${object.id} + ')'" style="font-size: 16px; padding: 12px 24px;">
+                    🤖 Create Test Cases with AI
+                </button>
+            </div>
+
+            <h2 style="color: #374151; margin-bottom: 15px;">Test Cases</h2>
+            <div class="table-container">
+                <table th:if="${testCases != null and !testCases.isEmpty()}">
+                    <thead>
+                        <tr>
+                            <th>Test#</th>
+                            <th>Description</th>
+                            <th>Scenario</th>
+                            <th th:text="${sourceEngine} + ' Status'">Source Status</th>
+                            <th th:text="${targetEngine} + ' Status'">Target Status</th>
+                            <th>Validation</th>
+                <th style="min-width: 180px;">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr th:each="tc : ${testCases}">
+                <td th:text="${tc.testNumber}"></td>
+                <td th:text="${tc.description}"></td>
+                <td th:text="${tc.scenario}"></td>
+                <td th:text="${tc.sourceStatus}"></td>
+                <td th:text="${tc.targetStatus}"></td>
+                <td>
+                    <span th:if="${tc.validationResult == 'PASS'}" class="status-pass">PASS</span>
+                    <span th:if="${tc.validationResult == 'FAIL'}" class="status-fail">FAIL</span>
+                    <span th:if="${tc.validationResult != 'PASS' and tc.validationResult != 'FAIL'}" th:text="${tc.validationResult}"></span>
+                </td>
+                <td>
+                    <button class="icon-btn" th:onclick="'executeSource(' + ${tc.id} + ')'" th:title="'Run ' + ${sourceEngine}">
+                        <img th:src="@{/images/{icon}.png(icon=${sourceIcon})}" th:alt="${sourceEngine}">
+                    </button>
+                    <button class="icon-btn" th:onclick="'convertToTarget(' + ${tc.id} + ')'" th:title="'Convert to ' + ${targetEngine}">
+                        <img th:src="@{/images/convert.png}" alt="Convert">
+                    </button>
+                    <button class="icon-btn" th:onclick="'executeTarget(' + ${tc.id} + ')'" th:title="'Run ' + ${targetEngine}">
+                        <img th:src="@{/images/{icon}.png(icon=${targetIcon})}" th:alt="${targetEngine}">
+                    </button>
+                    <button class="icon-btn" th:onclick="'deleteTestCase(' + ${tc.id} + ')'" title="Delete">
+                        <img th:src="@{/images/delete.png}" alt="Delete">
+                    </button>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+            </div>
+        </div>
+    </div>
+    
+    <div th:each="tc : ${testCases}" class="card" style="margin-bottom: 20px;">
+        <div class="card-header flex-between">
+            <h3 style="margin: 0;">Test <span th:text="${tc.testNumber}"></span>: <span th:text="${tc.description}"></span></h3>
+            <button class="btn btn-secondary btn-sm" th:data-tc-id="${tc.id}" th:data-desc="${tc.description}" onclick="editDescriptionModal(this.dataset.tcId, this.dataset.desc)" style="margin-left: 10px;">✏️ Edit Description</button>
+        </div>
+        
+        <div style="padding: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h4 style="margin: 0; color: #10b981;" th:text="'🟢 ' + ${sourceEngine} + ' SQL'">🟢 Source SQL</h4>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn btn-success btn-sm" th:onclick="'executeSource(' + ${tc.id} + ')'">▶️ Run</button>
+                    <button class="btn btn-secondary btn-sm" th:onclick="'editSQL(' + ${tc.id} + ', \'source\')'">✏️ Edit</button>
+                    <button class="btn btn-primary btn-sm" th:data-tc-id="${tc.id}" th:data-engine="${sourceEngineRaw}" onclick="fixTestCaseWithGenAI(this.dataset.tcId, this.dataset.engine)">🤖 Fix Test Case</button>
+                    <button class="btn btn-info btn-sm" th:onclick="'convertToTarget(' + ${tc.id} + ')'">➡️ Convert to Target</button>
+                </div>
+            </div>
+            <div class="sql-box" th:id="'source-sql-' + ${tc.id}" th:text="${tc.sourceSql}"></div>
+            <div th:if="${tc.sourceResult}" style="margin-top: 10px; padding: 10px; background: #f0fdf4; border-left: 3px solid #10b981; border-radius: 4px;">
+                <strong>Result:</strong> <pre style="margin: 5px 0 0 0; white-space: pre-wrap; font-family: monospace; font-size: 13px;" th:text="${tc.sourceResult}"></pre><br>
+                <strong>Execution Time:</strong> <span th:text="${tc.sourceExecutionTimeMs}"></span> ms
+            </div>
+            <div th:if="${tc.sourceError}" style="margin-top: 10px; padding: 10px; background: #fef2f2; border-left: 3px solid #ef4444; border-radius: 4px; color: #991b1b;">
+                <strong>Error:</strong> <pre style="margin: 5px 0 0 0; white-space: pre-wrap; font-family: monospace; font-size: 13px; color: #991b1b;" th:text="${tc.sourceError}"></pre>
+            </div>
+            
+            <div th:if="${tc.targetSql}" style="margin-top: 30px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h4 style="margin: 0; color: #3b82f6;" th:text="'🔵 ' + ${targetEngine} + ' SQL'">🔵 Target SQL</h4>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-success btn-sm" th:onclick="'executeTarget(' + ${tc.id} + ')'">▶️ Run</button>
+                        <button class="btn btn-secondary btn-sm" th:onclick="'editSQL(' + ${tc.id} + ', \'target\')'">✏️ Edit</button>
+                        <button class="btn btn-primary btn-sm" th:data-tc-id="${tc.id}" th:data-engine="${targetEngineRaw}" onclick="fixTestCaseWithGenAI(this.dataset.tcId, this.dataset.engine)">🤖 Fix Test Case</button>
+                        <button class="btn btn-success btn-sm" th:onclick="'fixTargetCodeWithGenAI(' + ${tc.id} + ')'">🔧 Fix Target Code</button>
+                    </div>
+                </div>
+                <div class="sql-box" th:id="'target-sql-' + ${tc.id}" th:text="${tc.targetSql}"></div>
+                <div th:if="${tc.targetResult}" style="margin-top: 10px; padding: 10px; background: #eff6ff; border-left: 3px solid #3b82f6; border-radius: 4px;">
+                    <strong>Result:</strong> <pre style="margin: 5px 0 0 0; white-space: pre-wrap; font-family: monospace; font-size: 13px;" th:text="${tc.targetResult}"></pre><br>
+                    <strong>Execution Time:</strong> <span th:text="${tc.targetExecutionTimeMs}"></span> ms
+                </div>
+                <div th:if="${tc.targetError}" style="margin-top: 10px; padding: 10px; background: #fef2f2; border-left: 3px solid #ef4444; border-radius: 4px; color: #991b1b;">
+                    <strong>Error:</strong> <pre style="margin: 5px 0 0 0; white-space: pre-wrap; font-family: monospace; font-size: 13px; color: #991b1b;" th:text="${tc.targetError}"></pre>
+                </div>
+            </div>
+            
+            <div th:if="${tc.validationNotes}" style="margin-top: 10px; padding: 10px; background: #fff3cd; border-radius: 4px;">
+                <strong>Validation Notes:</strong> <span th:text="${tc.validationNotes}" style="white-space: pre-line;"></span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Edit Modal -->
+    <div id="editModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000;">
+        <div style="background:white; margin:50px auto; padding:20px; width:80%; max-width:800px; border-radius:5px;">
+            <h2>Edit SQL</h2>
+            <textarea id="editSqlText" style="width:100%; height:300px; font-family:monospace; padding:10px;"></textarea>
+            <br><br>
+            <button onclick="saveSQL()" style="background:#28a745; color:white; padding:10px 20px; border:none; cursor:pointer;">Save</button>
+            <button onclick="closeEditModal()" style="background:#6c757d; color:white; padding:10px 20px; border:none; cursor:pointer; margin-left:10px;">Cancel</button>
+        </div>
+    </div>
+    
+    <!-- Fix Test Modal -->
+    <div id="fixTestModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000;">
+        <div style="background:white; margin:50px auto; padding:20px; width:80%; max-width:800px; border-radius:5px;">
+            <h2>🤖 Fix Test Case with AI</h2>
+            <label for="fixTestInstruction"><strong>Additional Instructions (optional):</strong></label>
+            <textarea id="fixTestInstruction" placeholder="Enter any additional instructions for fixing the test..." style="width:100%; min-height:150px; font-family:monospace; padding:10px; margin-top:10px;"></textarea>
+            <br><br>
+            <button onclick="submitFixTest()" style="background:#0d6efd; color:white; padding:10px 20px; border:none; cursor:pointer;">Fix Test Case</button>
+            <button onclick="closeFixTestModal()" style="background:#6c757d; color:white; padding:10px 20px; border:none; cursor:pointer; margin-left:10px;">Cancel</button>
+        </div>
+    </div>
+    
+    <!-- Fix Target Code Modal -->
+    <div id="fixTargetModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000;">
+        <div style="background:white; margin:50px auto; padding:20px; width:80%; max-width:800px; border-radius:5px;">
+            <h2>🔧 Fix Target Code with AI</h2>
+            <div style="background:#fff3cd; border:1px solid #ffc107; padding:10px; margin-bottom:15px; border-radius:4px;">
+                <strong style="color:#dc3545;">⚠️ WARNING:</strong> <span style="color:#856404;">Fix Target Code will automatically deploy AI-generated code to the target database without explicit confirmation.</span>
+            </div>
+            <label for="fixTargetInstruction"><strong>Additional Instructions (optional):</strong></label>
+            <textarea id="fixTargetInstruction" placeholder="Enter any additional instructions for fixing the target code..." style="width:100%; min-height:150px; font-family:monospace; padding:10px; margin-top:10px;"></textarea>
+            <br><br>
+            <button onclick="submitFixTarget()" style="background:#198754; color:white; padding:10px 20px; border:none; cursor:pointer;">Fix Target Code</button>
+            <button onclick="closeFixTargetModal()" style="background:#6c757d; color:white; padding:10px 20px; border:none; cursor:pointer; margin-left:10px;">Cancel</button>
+        </div>
+    </div>
+    
+    <!-- Edit Description Modal -->
+    <div id="editDescModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000;">
+        <div style="background:white; margin:50px auto; padding:20px; width:80%; max-width:600px; border-radius:5px;">
+            <h2>✏️ Edit Test Description</h2>
+            <input type="hidden" id="editDescTestCaseId">
+            <label for="editDescInput"><strong>Description:</strong></label>
+            <input type="text" id="editDescInput" style="width:100%; padding:10px; margin-top:10px; font-size:14px;">
+            <br><br>
+            <button onclick="saveDescriptionModal()" style="background:#0d6efd; color:white; padding:10px 20px; border:none; cursor:pointer;">Save</button>
+            <button onclick="closeEditDescModal()" style="background:#6c757d; color:white; padding:10px 20px; border:none; cursor:pointer; margin-left:10px;">Cancel</button>
+        </div>
+    </div>
+    
+    <script th:inline="javascript">
+        const contextPath = /*[[@{/}]]*/ '';
+        const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+        const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+        let currentTestCaseId = null;
+        let currentDbType = null;
+        let currentFixTestCaseId = null;
+        let currentFixTestDbType = null;
+        let currentFixTargetTestCaseId = null;
+        
+        function showAlert(message) {
+            alert(message);
+            if (message.startsWith('SUCCESS') || message.includes('successfully')) {
+                location.reload();
+            }
+        }
+        
+        function generateTests(objectId) {
+            if (!confirm('Generate 3 test cases?')) return;
+            fetch(contextPath + 'validation/' + objectId + '/generate', { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(response => response.text())
+                .then(data => {
+                    showAlert(data);
+                    location.reload();
+                });
+        }
+        
+        function executeSource(testCaseId) {
+            fetch(contextPath + 'testcase/' + testCaseId + '/execute-source', { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(response => response.text())
+                .then(data => {
+                    showAlert(data);
+                    location.reload();
+                });
+        }
+        
+        function convertToTarget(testCaseId) {
+            fetch(contextPath + 'testcase/' + testCaseId + '/convert', { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(response => response.text())
+                .then(data => {
+                    showAlert(data);
+                    location.reload();
+                });
+        }
+        
+        function executeTarget(testCaseId) {
+            fetch(contextPath + 'testcase/' + testCaseId + '/execute-postgresql', { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(response => response.text())
+                .then(data => {
+                    showAlert(data);
+                    location.reload();
+                });
+        }
+        
+        function deleteTestCase(testCaseId) {
+            if (!confirm('Delete this test case?')) return;
+            fetch(contextPath + 'test-case/' + testCaseId + '/delete', { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(response => response.text())
+                .then(data => {
+                    if (data === 'SUCCESS') {
+                        location.reload();
+                    } else {
+                        showAlert(data);
+                    }
+                });
+        }
+        
+        function editSQL(testCaseId, dbType) {
+            currentTestCaseId = testCaseId;
+            currentDbType = dbType;
+            
+            let sqlElement = document.getElementById((dbType === 'source' ? 'source-sql-' : 'target-sql-') + testCaseId);
+            if (sqlElement) {
+                document.getElementById('editSqlText').value = sqlElement.innerText;
+                document.getElementById('editModal').style.display = 'block';
+            } else {
+                alert('SQL element not found for test case ' + testCaseId);
+            }
+        }
+        
+        function closeEditModal() {
+            document.getElementById('editModal').style.display = 'none';
+            currentTestCaseId = null;
+            currentDbType = null;
+        }
+        
+        function saveSQL() {
+            let newSql = document.getElementById('editSqlText').value;
+            
+            // Get current SQL values
+            let sourceSql = document.getElementById('source-sql-' + currentTestCaseId).innerText;
+            let pgSql = document.getElementById('target-sql-' + currentTestCaseId) ? 
+                        document.getElementById('target-sql-' + currentTestCaseId).innerText : '';
+            
+            // Update the appropriate one
+            if (currentDbType === 'source') {
+                sourceSql = newSql;
+            } else {
+                pgSql = newSql;
+            }
+            
+            fetch(contextPath + 'testcase/' + currentTestCaseId + '/update', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    [csrfHeader]: csrfToken
+                },
+                body: 'sourceSql=' + encodeURIComponent(sourceSql) + '&targetSql=' + encodeURIComponent(pgSql)
+            })
+            .then(response => response.text())
+            .then(data => {
+                showAlert(data);
+                closeEditModal();
+                location.reload();
+            });
+        }
+        
+        function fixTestCaseWithGenAI(testCaseId, dbType) {
+            currentFixTestCaseId = testCaseId;
+            currentFixTestDbType = dbType;
+            document.getElementById('fixTestInstruction').value = '';
+            document.getElementById('fixTestModal').style.display = 'block';
+        }
+        
+        function closeFixTestModal() {
+            document.getElementById('fixTestModal').style.display = 'none';
+            currentFixTestCaseId = null;
+            currentFixTestDbType = null;
+        }
+        
+        function submitFixTest() {
+            let userInput = document.getElementById('fixTestInstruction').value;
+            
+            // Hide input form and show loading message
+            document.getElementById('fixTestModal').querySelector('div > div').innerHTML = 
+                '<h2>🤖 Fixing Test Case with AI</h2>' +
+                '<div style="padding: 20px; text-align: center;">' +
+                '<p>Processing your request...</p>' +
+                '<p style="color: #666;">This may take a few moments.</p>' +
+                '</div>';
+            
+            fetch(contextPath + 'testcase/' + currentFixTestCaseId + '/fix/' + currentFixTestDbType, { 
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    [csrfHeader]: csrfToken
+                },
+                body: 'additionalInstructions=' + encodeURIComponent(userInput || '')
+            })
+                .then(response => response.text())
+                .then(data => {
+                    showAlert(data);
+                    closeFixTestModal();
+                    location.reload();
+                });
+        }
+        
+        function fixTargetCodeWithGenAI(testCaseId) {
+            currentFixTargetTestCaseId = testCaseId;
+            document.getElementById('fixTargetInstruction').value = '';
+            document.getElementById('fixTargetModal').style.display = 'block';
+        }
+        
+        function closeFixTargetModal() {
+            document.getElementById('fixTargetModal').style.display = 'none';
+            currentFixTargetTestCaseId = null;
+        }
+        
+        function submitFixTarget() {
+            let userInput = document.getElementById('fixTargetInstruction').value;
+            
+            // Hide input form and show loading message
+            document.getElementById('fixTargetModal').querySelector('div > div').innerHTML = 
+                '<h2>🔧 Fixing Target Code with AI</h2>' +
+                '<div style="padding: 20px; text-align: center;">' +
+                '<p>Processing your request...</p>' +
+                '<p style="color: #666;">This may take a few moments. The AI will analyze the error and generate corrected code.</p>' +
+                '</div>';
+            
+            fetch(contextPath + 'testcase/' + currentFixTargetTestCaseId + '/fix-target-code', { 
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    [csrfHeader]: csrfToken
+                },
+                body: 'additionalInstructions=' + encodeURIComponent(userInput || '')
+            })
+                .then(response => response.text())
+                .then(data => {
+                    showAlert(data);
+                    closeFixTargetModal();
+                    location.reload();
+                });
+        }
+        
+        function editDescriptionModal(testCaseId, description) {
+            document.getElementById('editDescTestCaseId').value = testCaseId;
+            document.getElementById('editDescInput').value = description;
+            document.getElementById('editDescModal').style.display = 'block';
+        }
+        
+        function closeEditDescModal() {
+            document.getElementById('editDescModal').style.display = 'none';
+        }
+        
+        function saveDescriptionModal() {
+            let testCaseId = document.getElementById('editDescTestCaseId').value;
+            let newDesc = document.getElementById('editDescInput').value;
+            fetch(contextPath + 'testcase/' + testCaseId + '/description', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    [csrfHeader]: csrfToken
+                },
+                body: 'description=' + encodeURIComponent(newDesc)
+            }).then(() => {
+                closeEditDescModal();
+                location.reload();
+            });
+        }
+    </script>
+</body>
+</html>

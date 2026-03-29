@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="_csrf" th:content="${_csrf.token}"/>
+    <meta name="_csrf_header" th:content="${_csrf.headerName}"/>
+    <title>MMA Test Manager - Home</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>🗂️ MMA Test Manager</h1>
+            <div class="header-nav">
+                <a th:href="@{/knowledge-base}" class="btn btn-secondary btn-sm">Global Knowledge Base</a>
+                <form method="post" th:action="@{/logout}" style="display: inline;">
+                    <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card" th:if="${sourceDbConnectionString != null or targetDbConnectionString != null}">
+            <div class="card-header">
+                <h2>🔌 Database Connections</h2>
+            </div>
+            <div style="padding: 15px;">
+                <div th:if="${sourceDbConnectionString != null}" style="margin-bottom: 15px;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <img th:src="${sourceDbIcon}" alt="Source DB" style="width: 32px; height: 32px;">
+                        <strong style="min-width: 150px;"><span th:text="${sourceDbEngine}"></span> (Source)</strong>
+                        <div style="flex: 1; background: #f5f5f5; padding: 8px; border-radius: 4px; font-family: monospace; word-wrap: break-word; overflow-wrap: break-word;">
+                            <span th:text="${sourceDbConnectionString}"></span>
+                        </div>
+                    </div>
+                </div>
+                <div th:if="${targetDbConnectionString != null}">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <img th:src="${targetDbIcon}" alt="Target DB" style="width: 32px; height: 32px;">
+                        <strong style="min-width: 150px;"><span th:text="${targetDbEngine}"></span> (Target)</strong>
+                        <div style="flex: 1; background: #f5f5f5; padding: 8px; border-radius: 4px; font-family: monospace; word-wrap: break-word; overflow-wrap: break-word;">
+                            <span th:text="${targetDbConnectionString}"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>📥 Load New Project</h2>
+            </div>
+            <form method="post" th:action="@{/load}">
+                <div class="form-group">
+                    <label>S3 Project Path:</label>
+                    <input type="text" name="s3Path" class="form-control" th:value="${defaultS3Path}" 
+                           placeholder="s3://bucket/path/to/dms-sc-project" required>
+                </div>
+                <button type="submit" class="btn btn-primary">Load from S3</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="card-header flex-between">
+                <h2>📋 Existing Projects</h2>
+            </div>
+            <div class="table-container" th:if="${projects != null and !projects.isEmpty()}">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 15%;">Project ID</th>
+                            <th style="width: 12%;">Engines</th>
+                            <th>S3 Path</th>
+                            <th style="width: 12%;">Created At</th>
+                            <th style="width: 8%;">Status</th>
+                            <th style="width: 8%;">Objects</th>
+                            <th style="width: 12%;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr th:each="project : ${projects}">
+                            <td style="word-break: break-all;"><strong th:text="${project.id}"></strong></td>
+                            <td style="white-space: nowrap; vertical-align: middle;">
+                                <img th:if="${project.sourceEndpoint != null}" 
+                                     th:src="@{/images/{engine}.png(engine=${project.sourceEndpoint.dbEngine})}"
+                                     th:alt="${project.sourceEndpoint.dbEngine}"
+                                     style="width: 32px; height: 32px; cursor: pointer; margin-right: 5px; vertical-align: middle;"
+                                     th:onclick="'showEndpointInfo(' + ${project.sourceEndpoint.id} + ')'"
+                                     title="Source Database">
+                                <span style="color: #9ca3af; vertical-align: middle;">→</span>
+                                <img th:if="${project.targetEndpoint != null}" 
+                                     th:src="@{/images/{engine}.png(engine=${project.targetEndpoint.dbEngine})}"
+                                     th:alt="${project.targetEndpoint.dbEngine}"
+                                     style="width: 32px; height: 32px; cursor: pointer; margin-left: 5px; vertical-align: middle;"
+                                     th:onclick="'showEndpointInfo(' + ${project.targetEndpoint.id} + ')'"
+                                     title="Target Database">
+                            </td>
+                            <td th:text="${project.s3Path}"></td>
+                            <td th:text="${project.createdAt}"></td>
+                            <td>
+                                <span class="badge badge-success" th:if="${project.status == 'COMPLETED'}">Completed</span>
+                                <span class="badge badge-info" th:if="${project.status != 'COMPLETED'}" th:text="${project.status}"></span>
+                            </td>
+                            <td th:text="${project.objectCount}"></td>
+                            <td>
+                                <a th:href="@{/project/{id}(id=${project.id})}" class="btn btn-primary btn-sm">View</a>
+                                <button class="btn btn-danger btn-sm" th:attr="data-project-id=${project.id}" onclick="deleteProject(this.dataset.projectId)">Delete</button>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p th:if="${projects == null or projects.isEmpty()}" class="text-center" style="padding: 40px; color: #6b7280;">
+                No projects loaded yet. Load a project from S3 to get started.
+            </p>
+        </div>
+    </div>
+
+    <!-- Endpoint Info Modal -->
+    <div id="endpointModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000;">
+        <div style="background:white; margin:50px auto; padding:20px; width:80%; max-width:600px; border-radius:8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-bottom: 2px solid #e5e7eb; padding-bottom:10px;">
+                <h2 style="margin:0;">Database Endpoint Information</h2>
+                <button onclick="closeEndpointModal()" style="background:none; border:none; font-size:24px; cursor:pointer; color:#6b7280;">&times;</button>
+            </div>
+            <div id="endpointInfo" style="font-family:monospace; font-size:14px;"></div>
+        </div>
+    </div>
+
+    <script th:inline="javascript">
+        const contextPath = /*[[@{/}]]*/ '';
+        const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+        const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+        
+        function deleteProject(projectId) {
+            if (!confirm('Delete this project and all its data? This cannot be undone.')) {
+                return;
+            }
+            fetch(contextPath + 'project/' + projectId + '/delete', { 
+                method: 'POST',
+                headers: {
+                    [csrfHeader]: csrfToken
+                }
+            })
+                .then(response => response.text())
+                .then(data => {
+                    if (data === 'SUCCESS') {
+                        location.reload();
+                    } else {
+                        alert(data);
+                    }
+                });
+        }
+        
+        function showEndpointInfo(endpointId) {
+            fetch(contextPath + 'endpoint/' + endpointId)
+                .then(response => response.json())
+                .then(data => {
+                    let html = '<table style="width:100%; border-collapse: collapse;">';
+                    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:bold; width:40%;">Type:</td><td style="padding:8px;">' + data.endpointType + '</td></tr>';
+                    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:bold;">Engine:</td><td style="padding:8px;">' + data.dbEngine + '</td></tr>';
+                    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:bold;">Vendor:</td><td style="padding:8px;">' + (data.vendorName || 'N/A') + '</td></tr>';
+                    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:bold;">Version:</td><td style="padding:8px;">' + (data.vendorEngineVersion || 'N/A') + '</td></tr>';
+                    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:bold;">Edition:</td><td style="padding:8px;">' + (data.vendorEdition || 'N/A') + '</td></tr>';
+                    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:bold;">Connection:</td><td style="padding:8px; word-break:break-all;">' + (data.connectionData || 'N/A') + '</td></tr>';
+                    html += '<tr><td style="padding:8px; font-weight:bold;">Full Engine:</td><td style="padding:8px; word-break:break-all;">' + (data.vendorEngine || 'N/A') + '</td></tr>';
+                    html += '</table>';
+                    document.getElementById('endpointInfo').innerHTML = html;
+                    document.getElementById('endpointModal').style.display = 'block';
+                })
+                .catch(error => {
+                    alert('Error loading endpoint info: ' + error);
+                });
+        }
+        
+        function closeEndpointModal() {
+            document.getElementById('endpointModal').style.display = 'none';
+        }
+    </script>
+</body>
+</html>

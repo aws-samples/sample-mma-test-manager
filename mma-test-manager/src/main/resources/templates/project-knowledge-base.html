@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="_csrf" th:content="${_csrf.token}"/>
+    <meta name="_csrf_header" th:content="${_csrf.headerName}"/>
+    <title>Project Knowledge Base - MMA Test Manager</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>🗂️ MMA Test Manager</h1>
+            <div class="header-nav">
+                <a th:href="@{/project/{id}(id=${project.id})}" class="btn btn-secondary btn-sm">← Back to Project</a>
+                <a th:href="@{/knowledge-base}" class="btn btn-secondary btn-sm">Global Knowledge Base</a>
+                <form method="post" th:action="@{/logout}" style="display: inline;">
+                    <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <div class="card-header">
+                <h2>📚 Knowledge Base Settings for Project</h2>
+                <p style="color: #6b7280; margin-top: 10px;">
+                    <strong th:text="${project.id}"></strong> 
+                    (<span th:text="${project.sourceEndpoint.dbEngine}"></span> → <span th:text="${project.targetEndpoint.dbEngine}"></span>)
+                </p>
+            </div>
+            
+            <div class="table-container" th:if="${knowledgeBases != null and !knowledgeBases.isEmpty()}">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 25%;">Name</th>
+                            <th style="width: 10%;">Source → Target</th>
+                            <th style="width: 20%;">Categories</th>
+                            <th style="width: 8%;">Priority</th>
+                            <th style="width: 10%;">Actions</th>
+                            <th style="width: 5%;">Enabled</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr th:each="kb : ${knowledgeBases}">
+                            <td><strong th:text="${kb.name}"></strong></td>
+                            <td style="white-space: nowrap; text-align: center;">
+                                <img th:src="@{/images/{engine}.png(engine=${#strings.toLowerCase(kb.sourceDbEngine)})}"
+                                     th:alt="${kb.sourceDbEngine}"
+                                     style="width: 24px; height: 24px; vertical-align: middle;"
+                                     th:title="${kb.sourceDbEngine}">
+                                <span style="color: #9ca3af; margin: 0 5px;">→</span>
+                                <img th:src="@{/images/{engine}.png(engine=${#strings.toLowerCase(kb.targetDbEngine)})}"
+                                     th:alt="${kb.targetDbEngine}"
+                                     style="width: 24px; height: 24px; vertical-align: middle;"
+                                     th:title="${kb.targetDbEngine}">
+                            </td>
+                            <td>
+                                <span th:each="cat, iterStat : ${kb.categories}" 
+                                      class="badge badge-info" 
+                                      style="margin-right: 5px;"
+                                      th:text="${cat}"></span>
+                            </td>
+                            <td th:text="${kb.priority}"></td>
+                            <td>
+                                <button class="btn btn-info btn-sm" th:data-kb-id="${kb.id}" onclick="viewKnowledgeBase(this.getAttribute('data-kb-id'))">View</button>
+                            </td>
+                            <td style="text-align: center;">
+                                <input type="checkbox" 
+                                       th:checked="${kb.enabled}"
+                                       th:data-project-id="${project.id}"
+                                       th:data-kb-id="${kb.id}"
+                                       onchange="toggleKnowledgeBase(this.getAttribute('data-project-id'), this.getAttribute('data-kb-id'), this.checked)">
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p th:if="${knowledgeBases == null or knowledgeBases.isEmpty()}" class="text-center" style="padding: 40px; color: #6b7280;">
+                No knowledge bases available for this project's database engines.
+            </p>
+        </div>
+    </div>
+
+    <!-- View Knowledge Base Modal -->
+    <div id="viewModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000;">
+        <div style="background:white; margin:50px auto; padding:20px; width:80%; max-width:900px; border-radius:5px; max-height:80vh; overflow-y:auto;">
+            <h2 id="modalTitle"></h2>
+            <div id="modalContent" style="white-space: pre-wrap; font-family: monospace; background: #f9fafb; padding: 15px; border-radius: 4px; margin-top: 15px;"></div>
+            <button onclick="closeModal()" style="background:#6c757d; color:white; padding:10px 20px; border:none; cursor:pointer; margin-top:15px;">Close</button>
+        </div>
+    </div>
+
+    <script th:inline="javascript">
+        const contextPath = /*[[@{/}]]*/ '';
+        const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+        const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+        const knowledgeBasesData = /*[[${knowledgeBasesJson}]]*/ '[]';
+        const kbMap = JSON.parse(knowledgeBasesData);
+
+        function toggleKnowledgeBase(projectId, kbId, enabled) {
+            fetch(`${contextPath}project/${projectId}/knowledge-base/${kbId}/toggle`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    [csrfHeader]: csrfToken
+                },
+                body: JSON.stringify({enabled: enabled})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    const status = enabled ? 'enabled' : 'disabled';
+                    alert(`Knowledge base ${status} successfully`);
+                } else {
+                    alert('Failed to update knowledge base setting');
+                    location.reload();
+                }
+            })
+            .catch(error => {
+                alert('Error updating knowledge base setting');
+                location.reload();
+            });
+        }
+
+        function viewKnowledgeBase(kbId) {
+            const kb = kbMap[kbId];
+            if (kb) {
+                document.getElementById('modalTitle').textContent = kb.name;
+                document.getElementById('modalContent').textContent = kb.content;
+                document.getElementById('viewModal').style.display = 'block';
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('viewModal').style.display = 'none';
+        }
+    </script>
+</body>
+</html>

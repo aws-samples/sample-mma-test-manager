@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>Conversion Issues</title>
+    <style>
+        body { font-family: Arial; margin: 20px; }
+        .header { background: #dc3545; color: white; padding: 15px; margin-bottom: 20px; }
+        .issues-box { background: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0; white-space: pre-wrap; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; cursor: pointer; }
+        .warning { color: #856404; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>⚠️ Conversion Issues</h1>
+        <p><strong>Object:</strong> <span th:text="${object.sourceObjectType}"></span> 
+           <span th:text="${object.sourceSchemaName}"></span>.<span th:text="${object.sourceObjectName}"></span></p>
+    </div>
+    
+    <button onclick="history.back()">← Back</button>
+    
+    <h2 class="warning">Action Items Required</h2>
+    <div class="issues-box" th:text="${object.conversionIssues}"></div>
+    
+    <p><strong>Note:</strong> These issues need to be addressed before the object can be fully migrated to PostgreSQL.</p>
+</body>
+</html>

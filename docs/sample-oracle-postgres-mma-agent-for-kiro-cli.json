@@ -1,0 +1,66 @@
+{
+  "name": "mma-agent",
+  "description": "Agent with all MMA MCP servers for database migration operations",
+  "prompt": null,
+  "mcpServers": {
+    "postgres-client-mcp": {
+      "type": "stdio",
+      "command": "java",
+      "args": [
+        "-jar",
+        "/workshop/MMA-Samples/postgres-client-mcp/target/postgresql-mcp-server-1.0.0.jar",
+        "--spring.config.location=/workshop/MMA-Samples/postgres-client-mcp/application-secretsmanager.properties"
+      ],
+      "timeout": 300000,
+      "disabled": false
+    },
+    "oracle-client-mcp": {
+      "type": "stdio",
+      "command": "java",
+      "args": [
+        "-jar",
+        "/workshop/MMA-Samples/oracle-client-mcp/target/oracle-mcp-server-1.0.0.jar",
+        "--spring.config.location=/workshop/MMA-Samples/oracle-client-mcp/application-secretsmanager.properties"
+      ],
+      "timeout": 300000,
+      "disabled": false
+    }
+  },
+  "tools": [
+    "read",
+    "write",
+    "shell",
+    "aws",
+    "report",
+    "introspect",
+    "knowledge",
+    "thinking",
+    "todo",
+    "delegate",
+    "@postgres-client-mcp",
+    "@oracle-client-mcp"
+    ],
+  "toolAliases": {},
+  "allowedTools": [    
+    "read",
+    "write",
+    "shell",
+    "aws",
+    "report",
+    "introspect",
+    "knowledge",
+    "thinking",
+    "todo",
+    "delegate",
+    "@postgres-client-mcp",
+    "@oracle-client-mcp"
+  ],
+  "resources": [
+    "file://AGENTS.md",
+    "file://README.md"
+  ],
+  "hooks": {},
+  "toolsSettings": {},
+  "useLegacyMcpJson": true,
+  "model": null
+}

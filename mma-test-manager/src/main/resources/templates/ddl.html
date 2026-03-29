@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="_csrf" th:content="${_csrf.token}"/>
+    <meta name="_csrf_header" th:content="${_csrf.headerName}"/>
+    <title>DDL View - MMA Test Manager</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+    <style>
+        .ddl-section { margin-bottom: 30px; }
+        .ddl-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .ddl-header h3 { margin: 0; color: #374151; }
+        .ddl-controls { display: flex; gap: 10px; align-items: center; }
+        .ddl-controls select { padding: 8px 12px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; }
+        .ddl-box { background: #1e293b; color: #e2e8f0; padding: 20px; font-family: 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; border-radius: 8px; max-height: 500px; overflow-y: auto; line-height: 1.6; }
+        .source-badge { background: #10b981; color: white; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+        .target-badge { background: #3b82f6; color: white; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); }
+        .modal-content { background: white; margin: 3% auto; padding: 0; width: 90%; max-width: 1000px; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); }
+        .modal-header { padding: 20px 25px; border-bottom: 1px solid #e5e7eb; }
+        .modal-header h3 { margin: 0; color: #111827; }
+        .modal-body { padding: 25px; }
+        .modal-body textarea { width: 100%; min-height: 400px; font-family: 'Courier New', monospace; padding: 15px; border: 1px solid #ddd; border-radius: 5px; font-size: 13px; }
+        .modal-footer { padding: 15px 25px; border-top: 1px solid #e5e7eb; text-align: right; }
+        .loading { display: none; color: #667eea; margin-left: 10px; }
+        .object-info { background: #f9fafb; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .object-info strong { color: #374151; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1><img th:src="@{/images/ddl.png}" alt="DDL" style="width: 32px; height: 32px; vertical-align: middle;"> DDL Management</h1>
+            <div class="header-nav">
+                <a th:href="@{/project/{id}(id=${object.projectId})}" class="btn btn-secondary btn-sm">← Back to Project</a>
+                <form method="post" th:action="@{/logout}" style="display: inline;">
+                    <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <div class="object-info">
+                <div><strong>Source:</strong> (<span th:text="${object.sourceObjectType}"></span>) 
+                <span th:text="${object.sourceSchemaName}"></span>.<span th:if="${object.sourcePackageName != null and !object.sourcePackageName.isEmpty()}" th:text="${object.sourcePackageName + '.'}"></span><span th:text="${object.sourceObjectName}"></span></div>
+                <div><strong>Target:</strong> (<span th:text="${object.targetObjectType != null ? object.targetObjectType : object.sourceObjectType}"></span>) <span th:text="${object.targetSchemaName}"></span>.<span th:text="${object.targetObjectName != null and !object.targetObjectName.isEmpty() ? object.targetObjectName : '(not converted)'}"></span></div>
+            </div>
+
+            <div class="ddl-section">
+                <div class="ddl-header">
+                    <h3><span class="source-badge">SOURCE</span> <span th:text="${sourceEngine}">Source</span> DDL</h3>
+                    <div class="ddl-controls">
+                        <select id="sourceSelect" onchange="loadSourceDdl()" class="form-control">
+                            <option value="s3">From S3 (DMS)</option>
+                            <option value="db">From Database</option>
+                            <option value="user">User Overwrite</option>
+                        </select>
+                        <button class="btn btn-success btn-sm" onclick="retrieveSourceFromDb()">Retrieve from DB</button>
+                        <button class="btn btn-secondary btn-sm" onclick="showSaveSourceModal()">User Overwrite</button>
+                        <span class="loading" id="sourceLoading">Loading...</span>
+                    </div>
+                </div>
+                <div class="ddl-box" id="sourceDdl" th:text="${object.sourceDdl}"></div>
+            </div>
+
+            <div class="ddl-section">
+                <div class="ddl-header">
+                    <h3><span class="target-badge">TARGET</span> <span th:text="${targetEngine}">Target</span> DDL</h3>
+                    <div class="ddl-controls">
+                        <select id="targetSelect" onchange="loadTargetDdl()" class="form-control">
+                            <option value="s3">From S3 (DMS)</option>
+                            <option value="db">From Database</option>
+                            <option value="user">User Overwrite</option>
+                            <option value="converted">AI Converted</option>
+                        </select>
+                        <button class="btn btn-success btn-sm" onclick="retrieveTargetFromDb()">Retrieve from DB</button>
+                        <button class="btn btn-secondary btn-sm" onclick="showSaveTargetModal()">User Overwrite</button>
+                        <button class="btn btn-primary btn-sm" onclick="showConvertModal()">🤖 Convert with AI</button>
+                        <span class="loading" id="targetLoading">Loading...</span>
+                    </div>
+                </div>
+                <div class="ddl-box" id="targetDdl" th:text="${object.targetDdl}"></div>
+                <div style="margin-top: 15px; display: flex; align-items: center; gap: 15px;">
+                    <button class="btn btn-danger" onclick="applyToTargetDb()">⚠️ Apply to Target Database</button>
+                    <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                        <input type="checkbox" id="dropBeforeRecreate" style="cursor: pointer;">
+                        <span>Drop Object Before Recreate</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Save Source Modal -->
+    <div id="saveSourceModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Save as User Overwrite (Source)</h3>
+            </div>
+            <div class="modal-body">
+                <textarea id="saveSourceDdl"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('saveSourceModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="submitSaveSource()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Save Target Modal -->
+    <div id="saveTargetModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Save as User Overwrite (Target)</h3>
+            </div>
+            <div class="modal-body">
+                <textarea id="saveTargetDdl"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('saveTargetModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="submitSaveTarget()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Convert Modal -->
+    <div id="convertModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>🤖 Convert DDL with AI (Kiro CLI)</h3>
+            </div>
+            <div class="modal-body">
+                <label for="convertInstruction"><strong>Additional Instructions (optional):</strong></label>
+                <textarea id="convertInstruction" placeholder="Enter any additional conversion instructions..." style="min-height: 150px;"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('convertModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="submitConvert()">Convert</button>
+            </div>
+        </div>
+    </div>
+
+    <script th:inline="javascript">
+        const contextPath = /*[[@{/}]]*/ '';
+        const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+        const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+        const objectId = /*[[${object.id}]]*/ 0;
+        const ddlData = {
+            source: {
+                s3: /*[[${object.sourceDdl}]]*/ '',
+                db: /*[[${object.sourceDdlFromDb}]]*/ '',
+                user: /*[[${object.sourceDdlUserOverwrite}]]*/ ''
+            },
+            target: {
+                s3: /*[[${object.targetDdl}]]*/ '',
+                db: /*[[${object.targetDdlFromDb}]]*/ '',
+                user: /*[[${object.targetDdlUserOverwrite}]]*/ '',
+                converted: /*[[${object.targetDdlConverted}]]*/ ''
+            }
+        };
+        
+        // Initialize: auto-select DB if S3 is empty
+        window.onload = function() {
+            if (!ddlData.target.s3 || ddlData.target.s3.trim() === '') {
+                if (ddlData.target.db && ddlData.target.db.trim() !== '') {
+                    document.getElementById('targetSelect').value = 'db';
+                    loadTargetDdl();
+                }
+            }
+        };
+
+        function loadSourceDdl() {
+            const selected = document.getElementById('sourceSelect').value;
+            const ddl = ddlData.source[selected] || '(No DDL available for this option)';
+            document.getElementById('sourceDdl').textContent = ddl;
+        }
+
+        function loadTargetDdl() {
+            const selected = document.getElementById('targetSelect').value;
+            const ddl = ddlData.target[selected] || '(No DDL available for this option)';
+            document.getElementById('targetDdl').textContent = ddl;
+        }
+
+        function retrieveSourceFromDb() {
+            document.getElementById('sourceLoading').style.display = 'inline';
+            fetch(`${contextPath}ddl/${objectId}/retrieve-source-db`, { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(r => r.text())
+                .then(data => {
+                    document.getElementById('sourceLoading').style.display = 'none';
+                    if (data.startsWith('ERROR:')) {
+                        alert(data);
+                    } else {
+                        alert('Source DDL retrieved successfully. Reloading page...');
+                        location.reload();
+                    }
+                })
+                .catch(e => {
+                    document.getElementById('sourceLoading').style.display = 'none';
+                    alert('Error: ' + e.message);
+                });
+        }
+
+        function retrieveTargetFromDb() {
+            document.getElementById('targetLoading').style.display = 'inline';
+            fetch(`${contextPath}ddl/${objectId}/retrieve-target-db`, { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(r => r.text())
+                .then(data => {
+                    document.getElementById('targetLoading').style.display = 'none';
+                    if (data.startsWith('ERROR:')) {
+                        alert(data);
+                    } else {
+                        alert('Target DDL retrieved successfully. Reloading page...');
+                        location.reload();
+                    }
+                })
+                .catch(e => {
+                    document.getElementById('targetLoading').style.display = 'none';
+                    alert('Error: ' + e.message);
+                });
+        }
+
+        function showSaveSourceModal() {
+            const currentDdl = document.getElementById('sourceDdl').textContent;
+            document.getElementById('saveSourceDdl').value = currentDdl;
+            document.getElementById('saveSourceModal').style.display = 'block';
+        }
+
+        function showSaveTargetModal() {
+            const currentDdl = document.getElementById('targetDdl').textContent;
+            document.getElementById('saveTargetDdl').value = currentDdl;
+            document.getElementById('saveTargetModal').style.display = 'block';
+        }
+
+        function showConvertModal() {
+            document.getElementById('convertInstruction').value = '';
+            document.getElementById('convertModal').style.display = 'block';
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+
+        function submitSaveSource() {
+            const ddl = document.getElementById('saveSourceDdl').value;
+            fetch(`${contextPath}ddl/${objectId}/save-source-overwrite`, {
+                method: 'POST',
+                headers: { 
+                    'Content-Type': 'text/plain',
+                    [csrfHeader]: csrfToken
+                },
+                body: ddl
+            })
+            .then(r => r.text())
+            .then(data => {
+                if (data === 'SUCCESS') {
+                    closeModal('saveSourceModal');
+                    alert('Source DDL saved. Reloading page...');
+                    location.reload();
+                } else {
+                    alert(data);
+                }
+            })
+            .catch(e => alert('Error: ' + e.message));
+        }
+
+        function submitSaveTarget() {
+            const ddl = document.getElementById('saveTargetDdl').value;
+            fetch(`${contextPath}ddl/${objectId}/save-target-overwrite`, {
+                method: 'POST',
+                headers: { 
+                    'Content-Type': 'text/plain',
+                    [csrfHeader]: csrfToken
+                },
+                body: ddl
+            })
+            .then(r => r.text())
+            .then(data => {
+                if (data === 'SUCCESS') {
+                    closeModal('saveTargetModal');
+                    alert('Target DDL saved. Reloading page...');
+                    location.reload();
+                } else {
+                    alert(data);
+                }
+            })
+            .catch(e => alert('Error: ' + e.message));
+        }
+
+        function submitConvert() {
+            const instruction = document.getElementById('convertInstruction').value;
+            const sourceDdl = document.getElementById('sourceDdl').textContent;
+            
+            document.getElementById('targetLoading').style.display = 'inline';
+            closeModal('convertModal');
+            
+            const params = new URLSearchParams();
+            params.append('sourceDdl', sourceDdl);
+            params.append('instruction', instruction);
+            
+            const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+            const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+            
+            fetch(`${contextPath}ddl/${objectId}/convert`, {
+                method: 'POST',
+                headers: { 
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    [csrfHeader]: csrfToken
+                },
+                body: params
+            })
+            .then(r => r.text())
+            .then(data => {
+                document.getElementById('targetLoading').style.display = 'none';
+                if (data === 'SUCCESS') {
+                    alert('DDL converted successfully. Reloading page...');
+                    location.reload();
+                } else {
+                    alert(data);
+                }
+            })
+            .catch(e => {
+                document.getElementById('targetLoading').style.display = 'none';
+                alert('Error: ' + e.message);
+            });
+        }
+
+        function applyToTargetDb() {
+            const ddl = document.getElementById('targetDdl').textContent;
+            if (!ddl || ddl.trim() === '' || ddl.startsWith('(No DDL')) {
+                alert('No DDL to apply');
+                return;
+            }
+            
+            const dropBeforeRecreate = document.getElementById('dropBeforeRecreate').checked;
+            const confirmMsg = dropBeforeRecreate 
+                ? '⚠️ WARNING: This will DROP the existing object (matching signature) and recreate it on the target database. Are you sure?'
+                : '⚠️ WARNING: This will execute the DDL on the target database. Are you sure?';
+            
+            if (!confirm(confirmMsg)) return;
+            
+            document.getElementById('targetLoading').style.display = 'inline';
+            fetch(`${contextPath}ddl/${objectId}/apply-to-target?dropBeforeRecreate=${dropBeforeRecreate}`, {
+                method: 'POST',
+                headers: { 
+                    'Content-Type': 'text/plain',
+                    [csrfHeader]: csrfToken
+                },
+                body: ddl
+            })
+            .then(r => r.text())
+            .then(data => {
+                document.getElementById('targetLoading').style.display = 'none';
+                if (data === 'SUCCESS') {
+                    alert('DDL applied to target database successfully!');
+                } else {
+                    alert(data);
+                }
+            })
+            .catch(e => {
+                document.getElementById('targetLoading').style.display = 'none';
+                alert('Error: ' + e.message);
+            });
+        }
+
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>

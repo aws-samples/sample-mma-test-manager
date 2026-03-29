@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="_csrf" th:content="${_csrf.token}"/>
+    <meta name="_csrf_header" th:content="${_csrf.headerName}"/>
+    <title>Dependencies - MMA Test Manager</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+    <style>
+        .code-box { background: #1e293b; color: #e2e8f0; padding: 15px; font-family: 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; border-radius: 5px; margin: 10px 0; max-height: 400px; overflow-y: auto; }
+        .type-badge { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; color: white; }
+        .type-table { background: #10b981; }
+        .type-view { background: #3b82f6; }
+        .type-function { background: #f59e0b; }
+        .type-procedure { background: #ef4444; }
+        .type-package { background: #8b5cf6; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1><img th:src="@{/images/dependencies.png}" alt="Dependencies" style="width: 32px; height: 32px; vertical-align: middle;"> Object Dependencies</h1>
+            <div class="header-nav">
+                <a th:href="@{/project/{id}(id=${object.projectId})}" class="btn btn-secondary btn-sm">← Back to Project</a>
+                <form method="post" th:action="@{/logout}" style="display: inline;">
+                    <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <div class="object-info" style="background: #f9fafb; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <div><strong>Source:</strong> (<span th:text="${object.sourceObjectType}"></span>) 
+                <span th:text="${object.sourceSchemaName}"></span>.<span th:if="${object.sourcePackageName != null and !object.sourcePackageName.isEmpty()}" th:text="${object.sourcePackageName + '.'}"></span><span th:text="${object.sourceObjectName}"></span></div>
+                <div><strong>Target:</strong> (<span th:text="${object.targetObjectType != null ? object.targetObjectType : object.sourceObjectType}"></span>) <span th:text="${object.targetSchemaName}"></span>.<span th:text="${object.targetObjectName != null and !object.targetObjectName.isEmpty() ? object.targetObjectName : '(not converted)'}"></span></div>
+            </div>
+    
+    <div class="section">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+            <h2>Source Database Dependencies (Objects Used by This Code)</h2>
+            <button class="btn btn-primary" onclick="analyzeSource()">🔍 Analyze</button>
+        </div>
+        <p>These are the database objects that this code depends on. If you modify or drop these objects, this code may break.</p>
+        
+        <div id="sourceLoading" style="display: none; color: #667eea; padding: 20px; text-align: center;">Analyzing source dependencies...</div>
+        <div id="sourceError" style="display: none; color: #ef4444; padding: 20px;"></div>
+        
+        <div id="sourceResults" style="display: none;">
+            <table id="sourceDepsTable">
+                <thead>
+                    <tr>
+                        <th>Type</th>
+                        <th>Owner</th>
+                        <th>Name</th>
+                        <th>Referenced Type</th>
+                        <th>Referenced Owner</th>
+                        <th>Referenced Name</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            
+            <div id="sourceTableBackups"></div>
+            <div id="targetTableBackups" style="margin-top: 30px; padding-top: 30px; border-top: 2px solid #e5e7eb;"></div>
+        </div>
+    </div>
+    
+    <script th:inline="javascript">
+        const contextPath = /*[[@{/}]]*/ '';
+        const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+        const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+        const objectId = /*[[${object.id}]]*/ 0;
+        
+        function analyzeSource() {
+            document.getElementById('sourceLoading').style.display = 'block';
+            document.getElementById('sourceError').style.display = 'none';
+            document.getElementById('sourceResults').style.display = 'none';
+            
+            fetch(`${contextPath}dependencies/${objectId}/analyze-source`, { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('sourceLoading').style.display = 'none';
+                    if (data.success) {
+                        renderDependencies(data.dependencies, data.tableDependencies, data.targetTableDependencies);
+                    } else {
+                        document.getElementById('sourceError').textContent = 'Error: ' + data.error;
+                        document.getElementById('sourceError').style.display = 'block';
+                    }
+                })
+                .catch(e => {
+                    document.getElementById('sourceLoading').style.display = 'none';
+                    document.getElementById('sourceError').textContent = 'Error: ' + e.message;
+                    document.getElementById('sourceError').style.display = 'block';
+                });
+        }
+        
+        function renderDependencies(dependencies, tableDeps, targetTableDeps) {
+            const tbody = document.querySelector('#sourceDepsTable tbody');
+            tbody.innerHTML = '';
+            
+            if (dependencies && dependencies.length > 0) {
+                dependencies.forEach(dep => {
+                    const row = tbody.insertRow();
+                    row.innerHTML = `
+                        <td>${dep.type}</td>
+                        <td>${dep.owner}</td>
+                        <td>${dep.name}</td>
+                        <td>${dep.referencedType}</td>
+                        <td>${dep.referencedOwner}</td>
+                        <td>${dep.referencedName}</td>
+                    `;
+                });
+                
+                if (tableDeps && tableDeps.length > 0) {
+                    const backupsDiv = document.getElementById('sourceTableBackups');
+                    backupsDiv.innerHTML = '<h3>Source Table Backup Scripts</h3><p>Before making changes, create backups of dependent tables using these scripts:</p>';
+                    tableDeps.forEach(table => {
+                        backupsDiv.innerHTML += `
+                            <h4>${table.referencedOwner}.${table.referencedName}</h4>
+                            <div class="code-box">${table.backupScript}</div>
+                        `;
+                    });
+                }
+                
+                if (targetTableDeps && targetTableDeps.length > 0) {
+                    const targetBackupsDiv = document.getElementById('targetTableBackups');
+                    targetBackupsDiv.innerHTML = '<h3>Target Table Backup Scripts</h3><p>Corresponding target tables that should also be backed up:</p>';
+                    targetTableDeps.forEach(table => {
+                        targetBackupsDiv.innerHTML += `
+                            <h4>${table.referencedOwner}.${table.referencedName}</h4>
+                            <div class="code-box">${table.backupScript}</div>
+                        `;
+                    });
+                }
+                
+                document.getElementById('sourceResults').style.display = 'block';
+            } else {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center;">No dependencies found.</td></tr>';
+                document.getElementById('sourceResults').style.display = 'block';
+            }
+        }
+    </script>
+</body>
+</html>

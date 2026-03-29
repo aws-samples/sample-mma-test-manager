@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="_csrf" th:content="${_csrf.token}"/>
+    <meta name="_csrf_header" th:content="${_csrf.headerName}"/>
+    <title>Project View - MMA Test Manager</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+    <style>
+        .test-buttons { display: flex; gap: 5px; }
+        .test-btn { padding: 4px; border: none; cursor: pointer; transition: all 0.2s; background: transparent; border-radius: 4px; }
+        .test-btn:hover { transform: scale(1.1); opacity: 0.8; }
+        .test-btn img { width: 32px; height: 32px; display: block; }
+        .status-cell { font-family: monospace; font-weight: 600; }
+        .action-buttons { display: flex; gap: 5px; }
+        .filters { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .filter-group { display: flex; gap: 20px; align-items: center; }
+        .filter-group label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+        .pagination { display: flex; justify-content: center; gap: 5px; margin-top: 20px; }
+        .page-btn { padding: 8px 12px; border: 1px solid #ddd; background: white; cursor: pointer; border-radius: 4px; }
+        .page-btn.active { background: #667eea; color: white; border-color: #667eea; }
+        .page-btn:hover:not(.active) { background: #f3f4f6; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>🗂️ MMA Test Manager</h1>
+            <div class="header-nav">
+                <a th:href="@{/}" class="btn btn-secondary btn-sm">← Back to Projects</a>
+                <a th:if="${project != null}" th:href="@{'/project/' + ${project.id} + '/knowledge-base'}" class="btn btn-secondary btn-sm">Project Knowledge Base</a>
+                <form method="post" th:action="@{/logout}" style="display: inline;">
+                    <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <div class="card-header">
+                <h2>Project: <span th:text="${projectId}"></span></h2>
+            </div>
+
+            <div class="tabs">
+                <a th:href="@{/project/{id}(id=${projectId},tab='code',showComplete=${showComplete},showIgnored=${showIgnored})}" 
+                   th:class="${tab == 'code' ? 'tab active' : 'tab'}">📦 Code Objects</a>
+                <a th:href="@{/project/{id}(id=${projectId},tab='other',showComplete=${showComplete},showIgnored=${showIgnored})}" 
+                   th:class="${tab == 'other' ? 'tab active' : 'tab'}">📋 Other Objects</a>
+            </div>
+
+            <div class="filters">
+                <form method="get" th:action="@{/project/{id}(id=${projectId})}" id="filterForm">
+                    <input type="hidden" name="tab" th:value="${tab}"/>
+                    <input type="hidden" name="showComplete" id="showCompleteHidden" th:value="${showComplete}"/>
+                    <input type="hidden" name="showIgnored" id="showIgnoredHidden" th:value="${showIgnored}"/>
+                    <input type="hidden" name="page" th:value="${currentPage}"/>
+                    <div class="filter-group" style="margin-bottom: 10px;">
+                        <label style="flex: 1; max-width: 600px;">
+                            <span style="font-weight: 600; margin-right: 8px; white-space: nowrap;">Search Object Name:</span>
+                            <input type="text" name="search" th:value="${search}" 
+                                   placeholder="Search schema, type, package, or object name"
+                                   style="width: 100%; padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 4px;"
+                                   onchange="document.getElementById('filterForm').submit()"/>
+                        </label>
+                        <button type="submit" class="btn btn-primary btn-sm">Search</button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="clearSearch()">Clear</button>
+                    </div>
+                    <div class="filter-group">
+                        <label>
+                            <input type="checkbox" id="showCompleteCheck" th:checked="${showComplete}" onchange="updateFilter()"/>
+                            <span>Show Complete</span>
+                        </label>
+                        <label>
+                            <input type="checkbox" id="showIgnoredCheck" th:checked="${showIgnored}" onchange="updateFilter()"/>
+                            <span>Show Ignored</span>
+                        </label>
+                    </div>
+                </form>
+            </div>
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th th:colspan="${sourceSupportsPackages ? 4 : 3}" style="background: #10b981; color: white;">Source Database (<span th:text="${sourceEngine}"></span>)</th>
+                            <th th:colspan="${targetSupportsPackages ? 4 : 3}" style="background: #3b82f6; color: white;">Target Database (<span th:text="${targetEngine}"></span>)</th>
+                            <th rowspan="2">Tests</th>
+                            <th rowspan="2">Conv. Actions</th>
+                            <th rowspan="2">Status</th>
+                            <th rowspan="2">Actions</th>
+                        </tr>
+                        <tr>
+                            <th style="background: #10b981; color: white;">Schema</th>
+                            <th style="background: #10b981; color: white;">Type</th>
+                            <th style="background: #10b981; color: white;" th:if="${sourceSupportsPackages}">Package</th>
+                            <th style="background: #10b981; color: white;">Object</th>
+                            <th style="background: #3b82f6; color: white;">Schema</th>
+                            <th style="background: #3b82f6; color: white;">Type</th>
+                            <th style="background: #3b82f6; color: white;" th:if="${targetSupportsPackages}">Package</th>
+                            <th style="background: #3b82f6; color: white;">Object</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr th:each="obj : ${objects}">
+                            <td th:text="${obj.sourceSchemaName}"></td>
+                            <td th:text="${obj.sourceObjectType}"></td>
+                            <td th:if="${sourceSupportsPackages}" th:text="${obj.sourcePackageName}"></td>
+                            <td th:text="${obj.sourceObjectName}"></td>
+                            <td th:text="${obj.getTargetSchemaName()}"></td>
+                            <td th:text="${obj.getTargetObjectType()}"></td>
+                            <td th:if="${targetSupportsPackages}" th:text="${obj.getTargetPackageName()}"></td>
+                            <td th:text="${obj.getTargetObjectName()}"></td>
+                            <td th:if="${tab == 'code'}">
+                                <div class="test-buttons">
+                                    <button class="test-btn" th:onclick="'location.href=\'' + @{/ddl/{id}(id=${obj.id})} + '\''">
+                                        <img th:src="@{/images/ddl.png}" alt="DDL" title="DDL">
+                                    </button>
+                                    <button class="test-btn" th:onclick="'location.href=\'' + @{/unit/{id}(id=${obj.id})} + '\''">
+                                        <img th:src="@{/images/unit-test.png}" alt="PG Unit Test" title="PG Unit Test">
+                                    </button>
+                                    <button class="test-btn" th:onclick="'location.href=\'' + @{/comparison/{id}(id=${obj.id})} + '\''">
+                                        <img th:src="@{/images/comparison-test.png}" alt="Comparison Test" title="Comparison Test">
+                                    </button>
+                                    <button class="test-btn" th:onclick="'location.href=\'' + @{/dependencies/{id}(id=${obj.id})} + '\''">
+                                        <img th:src="@{/images/dependencies.png}" alt="Dependencies" title="Dependencies">
+                                    </button>
+                                </div>
+                            </td>
+                            <td th:if="${tab == 'other'}">
+                                <button class="test-btn" th:onclick="'location.href=\'' + @{/ddl/{id}(id=${obj.id})} + '\''">
+                                    <img th:src="@{/images/ddl.png}" alt="DDL" title="DDL">
+                                </button>
+                            </td>
+                            <td>
+                                <button th:if="${obj.conversionActions != null}" class="btn btn-danger btn-sm" 
+                                        th:data-actions="${obj.conversionActions}"
+                                        th:data-descriptors="${obj.actionItemsDescriptors}"
+                                        th:data-id="${obj.id}"
+                                        onclick="showActionsFromData(this)">
+                                    View
+                                </button>
+                                <span th:unless="${obj.conversionActions != null}">-</span>
+                            </td>
+                            <td class="status-cell" th:utext="${obj.getFormattedTestStatus(tab == 'code')}"></td>
+                            <td>
+                                <div class="action-buttons">
+                                    <button class="btn btn-success btn-sm" title="Mark Complete" th:onclick="'markComplete(' + ${obj.id} + ')'">✓</button>
+                                    <button class="btn btn-secondary btn-sm" title="Mark Ignore" th:onclick="'markIgnored(' + ${obj.id} + ')'">✗</button>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="pagination" th:if="${totalPages > 1}">
+                <button class="page-btn" th:if="${currentPage > 0}" 
+                        th:data-page="${currentPage - 1}"
+                        th:data-project="${projectId}"
+                        th:data-tab="${tab}"
+                        th:data-complete="${showComplete}"
+                        th:data-ignored="${showIgnored}"
+                        onclick="navigateToPage(this)">
+                    ← Previous
+                </button>
+                <span style="padding: 8px 12px;">Page <strong th:text="${currentPage + 1}"></strong> of <strong th:text="${totalPages}"></strong></span>
+                <button class="page-btn" th:if="${currentPage + 1 < totalPages}" 
+                        th:data-page="${currentPage + 1}"
+                        th:data-project="${projectId}"
+                        th:data-tab="${tab}"
+                        th:data-complete="${showComplete}"
+                        th:data-ignored="${showIgnored}"
+                        onclick="navigateToPage(this)">
+                    Next →
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Conversion Actions Modal -->
+    <div id="actionsModal" style="display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; background-color:rgba(0,0,0,0.4);">
+        <div style="background-color:#fefefe; margin:5% auto; padding:20px; border:1px solid #888; width:80%; max-width:800px; border-radius:8px; max-height:80vh; overflow-y:auto;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0;">Conversion Actions</h3>
+                <button onclick="closeModal()" style="background:none; border:none; font-size:28px; cursor:pointer; color:#aaa;">&times;</button>
+            </div>
+            <pre id="actionsContent" style="background:#f5f5f5; padding:15px; border-radius:4px; overflow-x:auto; white-space:pre-wrap; word-wrap:break-word;"></pre>
+        </div>
+    </div>
+
+    <script th:inline="javascript">
+        const contextPath = /*[[@{/}]]*/ '';
+        const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+        const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+        
+        function navigateToPage(btn) {
+            const page = btn.getAttribute('data-page');
+            const project = btn.getAttribute('data-project');
+            const tab = btn.getAttribute('data-tab');
+            const complete = btn.getAttribute('data-complete');
+            const ignored = btn.getAttribute('data-ignored');
+            const search = new URLSearchParams(window.location.search).get('search') || '';
+            location.href = '/project/' + project + '?tab=' + tab + '&page=' + page + '&showComplete=' + complete + '&showIgnored=' + ignored + '&search=' + encodeURIComponent(search);
+        }
+        
+        function updateFilter() {
+            document.getElementById('showCompleteHidden').value = document.getElementById('showCompleteCheck').checked;
+            document.getElementById('showIgnoredHidden').value = document.getElementById('showIgnoredCheck').checked;
+            document.getElementById('filterForm').submit();
+        }
+        
+        function clearSearch() {
+            const form = document.getElementById('filterForm');
+            form.querySelector('input[name="search"]').value = '';
+            form.submit();
+        }
+        
+        function markComplete(objectId) {
+            fetch(contextPath + 'object/' + objectId + '/complete', { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(response => response.text())
+                .then(data => {
+                    if (data === 'SUCCESS') {
+                        location.reload();
+                    } else {
+                        alert(data);
+                    }
+                })
+                .catch(error => alert('Error: ' + error));
+        }
+        
+        function markIgnored(objectId) {
+            fetch(contextPath + 'object/' + objectId + '/ignore', { 
+                method: 'POST',
+                headers: { [csrfHeader]: csrfToken }
+            })
+                .then(response => response.text())
+                .then(data => {
+                    if (data === 'SUCCESS') {
+                        location.reload();
+                    } else {
+                        alert(data);
+                    }
+                })
+                .catch(error => alert('Error: ' + error));
+        }
+        
+        function showActions(objectId, actionsJson, descriptorsJson) {
+            try {
+                const actions = JSON.parse(actionsJson);
+                let descriptors = {};
+                
+                if (descriptorsJson && descriptorsJson !== 'null' && descriptorsJson.trim() !== '') {
+                    try {
+                        descriptors = JSON.parse(descriptorsJson);
+                    } catch (e) {
+                        console.error('Error parsing descriptors:', e);
+                    }
+                }
+                
+                let content = '';
+                actions.forEach((action, index) => {
+                    content += `Action ${index + 1}:\n`;
+                    content += `  Code: ${action.code || 'N/A'}\n`;
+                    content += `  Node Name: ${action.nodeName || 'N/A'}\n`;
+                    content += `  Source Line: ${action.srcLine || 'N/A'}\n`;
+                    content += `  Source Range: ${action.srcRange || 'N/A'}\n`;
+                    content += `  Message State: ${action.messageActionState || 'N/A'}\n`;
+                    
+                    // Get descriptor details if available
+                    if (action.code && descriptors[action.code]) {
+                        const desc = descriptors[action.code];
+                        content += `\n  Descriptor:\n`;
+                        content += `    Severity: ${desc.severityType || 'N/A'}\n`;
+                        content += `    Topic: ${desc.topic || 'N/A'}\n`;
+                        content += `    Keyword: ${desc.keyWord || 'N/A'}\n`;
+                        content += `    Message: ${desc.groupingActionMessage || 'N/A'}\n`;
+                        content += `    Action Item: ${desc.actionItem || 'N/A'}\n`;
+                        if (desc.linkToDocument) {
+                            content += `    Documentation: ${desc.linkToDocument}\n`;
+                        }
+                    }
+                    
+                    // Show root cause if available
+                    if (action.rootCauseMessageAction && action.rootCauseMessageAction.rootCauseActionItem) {
+                        const rootCause = action.rootCauseMessageAction.rootCauseActionItem;
+                        content += `\n  Root Cause:\n`;
+                        content += `    Code: ${rootCause.code || 'N/A'}\n`;
+                        content += `    Arguments: ${rootCause.arguments ? rootCause.arguments.join(', ') : 'N/A'}\n`;
+                        
+                        // Get root cause descriptor
+                        if (rootCause.code && descriptors[rootCause.code]) {
+                            const rootDesc = descriptors[rootCause.code];
+                            content += `\n    Descriptor:\n`;
+                            content += `      Severity: ${rootDesc.severityType || 'N/A'}\n`;
+                            content += `      Topic: ${rootDesc.topic || 'N/A'}\n`;
+                            content += `      Keyword: ${rootDesc.keyWord || 'N/A'}\n`;
+                            content += `      Message: ${rootDesc.groupingActionMessage || 'N/A'}\n`;
+                            content += `      Action Item: ${rootDesc.actionItem || 'N/A'}\n`;
+                        }
+                    }
+                    content += `\n`;
+                });
+                
+                if (Object.keys(descriptors).length === 0) {
+                    content += '\n[Note: Action descriptors not available - reload project from S3]\n';
+                }
+                
+                document.getElementById('actionsContent').textContent = content;
+                document.getElementById('actionsModal').style.display = 'block';
+            } catch (e) {
+                alert('Error parsing actions: ' + e.message);
+                console.error('Full error:', e);
+            }
+        }
+        
+        function showActionsFromData(button) {
+            const actionsJson = button.getAttribute('data-actions');
+            const descriptorsJson = button.getAttribute('data-descriptors');
+            const objectId = button.getAttribute('data-id');
+            showActions(objectId, actionsJson, descriptorsJson);
+        }
+        
+        function closeModal() {
+            document.getElementById('actionsModal').style.display = 'none';
+        }
+        
+        window.onclick = function(event) {
+            if (event.target.id === 'actionsModal') {
+                closeModal();
+            }
+        }
+    </script>
+</body>
+</html>

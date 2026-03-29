@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knowledge Base Management</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>🗂️ MMA Test Manager</h1>
+            <div class="header-nav">
+                <a th:href="@{/}" class="btn btn-secondary btn-sm">Home</a>
+                <form method="post" th:action="@{/logout}" style="display: inline;">
+                    <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <div class="card-header flex-between">
+                <h2>📚 Knowledge Base Management</h2>
+                <a th:href="@{/knowledge-base/new}" class="btn btn-primary">Add New Knowledge Base</a>
+            </div>
+            
+            <!-- Search and Filter Form -->
+            <form method="get" th:action="@{/knowledge-base}" style="margin-bottom: 20px; padding: 20px; background: #f9fafb; border-radius: 5px;">
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 15px; align-items: end;">
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label>Search by Name</label>
+                        <input type="text" name="search" class="form-control" 
+                               th:value="${search}" placeholder="Enter knowledge base name...">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label>Source DB</label>
+                        <select name="sourceDb" class="form-control">
+                            <option value="">All</option>
+                            <option value="oracle" th:selected="${sourceDb == 'oracle'}">Oracle</option>
+                            <option value="sqlserver" th:selected="${sourceDb == 'sqlserver'}">SQL Server</option>
+                            <option value="mysql" th:selected="${sourceDb == 'mysql'}">MySQL</option>
+                            <option value="postgres" th:selected="${sourceDb == 'postgres'}">PostgreSQL</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label>Target DB</label>
+                        <select name="targetDb" class="form-control">
+                            <option value="">All</option>
+                            <option value="postgres" th:selected="${targetDb == 'postgres'}">PostgreSQL</option>
+                            <option value="mysql" th:selected="${targetDb == 'mysql'}">MySQL</option>
+                            <option value="oracle" th:selected="${targetDb == 'oracle'}">Oracle</option>
+                            <option value="sqlserver" th:selected="${targetDb == 'sqlserver'}">SQL Server</option>
+                        </select>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button type="submit" class="btn btn-primary">Search</button>
+                        <a th:href="@{/knowledge-base}" class="btn btn-secondary">Clear</a>
+                    </div>
+                </div>
+            </form>
+            
+            <div class="table-container" th:if="${knowledgeBases != null and !knowledgeBases.isEmpty()}">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 20%;">Name</th>
+                            <th style="width: 10%;">Source → Target</th>
+                            <th style="width: 20%;">Categories</th>
+                            <th style="width: 8%;">Priority</th>
+                            <th style="width: 8%;">Active</th>
+                            <th style="width: 12%;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr th:each="kb : ${knowledgeBases}">
+                            <td><strong th:text="${kb.name}"></strong></td>
+                            <td style="white-space: nowrap; text-align: center;">
+                                <img th:src="@{/images/{engine}.png(engine=${#strings.toLowerCase(kb.sourceDbEngine)})}"
+                                     th:alt="${kb.sourceDbEngine}"
+                                     style="width: 24px; height: 24px; vertical-align: middle;"
+                                     th:title="${kb.sourceDbEngine}">
+                                <span style="color: #9ca3af; margin: 0 5px;">→</span>
+                                <img th:src="@{/images/{engine}.png(engine=${#strings.toLowerCase(kb.targetDbEngine)})}"
+                                     th:alt="${kb.targetDbEngine}"
+                                     style="width: 24px; height: 24px; vertical-align: middle;"
+                                     th:title="${kb.targetDbEngine}">
+                            </td>
+                            <td>
+                                <span th:each="cat, iterStat : ${kb.categories}" 
+                                      class="badge badge-info" 
+                                      style="margin-right: 5px;"
+                                      th:text="${cat}"></span>
+                            </td>
+                            <td th:text="${kb.priority}"></td>
+                            <td>
+                                <span class="badge badge-success" th:if="${kb.active}">Yes</span>
+                                <span class="badge badge-danger" th:unless="${kb.active}">No</span>
+                            </td>
+                            <td>
+                                <a th:href="@{/knowledge-base/edit/{id}(id=${kb.id})}" class="btn btn-warning btn-sm" style="margin-right: 5px;">Edit</a>
+                                <form th:action="@{/knowledge-base/delete/{id}(id=${kb.id})}" method="post" style="display:inline;">
+                                    <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete this knowledge base?')">Delete</button>
+                                </form>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p th:if="${knowledgeBases == null or knowledgeBases.isEmpty()}" class="text-center" style="padding: 40px; color: #6b7280;">
+                No knowledge bases configured yet. Add one to get started.
+            </p>
+        </div>
+    </div>
+</body>
+</html>
