@@ -202,7 +202,7 @@
             const complete = btn.getAttribute('data-complete');
             const ignored = btn.getAttribute('data-ignored');
             const search = new URLSearchParams(window.location.search).get('search') || '';
-            location.href = '/project/' + project + '?tab=' + tab + '&page=' + page + '&showComplete=' + complete + '&showIgnored=' + ignored + '&search=' + encodeURIComponent(search);
+            location.href = contextPath + 'project/' + project + '?tab=' + tab + '&page=' + page + '&showComplete=' + complete + '&showIgnored=' + ignored + '&search=' + encodeURIComponent(search);
         }
         
         function updateFilter() {
