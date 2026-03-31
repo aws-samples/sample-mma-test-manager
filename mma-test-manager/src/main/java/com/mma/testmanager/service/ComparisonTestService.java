@@ -256,11 +256,12 @@ public class ComparisonTestService {
             "3. Complex scenario\n\n" +
             "For each test case provide:\n" +
             "- Test number (%d, %d, %d)\n" +
-            "- Description\n" +
-            "- Scenario type\n" +
+            "- Description (max 200 characters)\n" +
+            "- Scenario type (max 200 characters)\n" +
             "- SQL statement to execute (use full qualified name: %s)\n\n" +
             "DDL:\n%s\n\n" +
-            "IMPORTANT: Return ONLY valid JSON array with NO additional text.\n" +
+            "IMPORTANT: Keep description and scenario concise and under 200 characters each.\n" +
+            "Return ONLY valid JSON array with NO additional text.\n" +
             "Format: [{\"test_number\":\"%d\",\"description\":\"...\",\"scenario\":\"...\",\"sql\":\"...\"}]\n" +
             "Wrap your response with markers:\n" +
             "<<<JSON_START>>>\n" +
