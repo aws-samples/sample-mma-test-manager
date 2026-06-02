@@ -23,6 +23,7 @@ public class DdlService {
     private final OracleCommonService oracleService;
     private final PostgresCommonService postgresqlService;
     private final SQLServerCommonService sqlServerService;
+    private final SybaseCommonService sybaseService;
 
     @Transactional
     public void retrieveSourceDdlFromDb(Long objectId) {
@@ -67,6 +68,8 @@ public class DdlService {
             return oracleService.extractSourceDdl(objectId);
         } else if ("sqlserver".equalsIgnoreCase(sourceEngine)) {
             return sqlServerService.extractSourceDdl(objectId);
+        } else if ("sybase".equalsIgnoreCase(sourceEngine)) {
+            return sybaseService.extractSourceDdl(objectId);
         }
         
         throw new UnsupportedOperationException("Source database engine not supported: " + sourceEngine);

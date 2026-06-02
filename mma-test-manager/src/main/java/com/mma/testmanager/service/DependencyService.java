@@ -18,6 +18,7 @@ public class DependencyService {
     private final com.mma.testmanager.repository.ProjectRepository projectRepository;
     private final OracleCommonService oracleService;
     private final SQLServerCommonService sqlServerService;
+    private final SybaseCommonService sybaseService;
 
     public List<Dependency> getObjectDependencies(Long objectId) throws Exception {
         DatabaseObject obj = objectRepository.findById(objectId).orElseThrow();
@@ -28,6 +29,8 @@ public class DependencyService {
             return oracleService.getSourceDependencies(objectId);
         } else if ("SQLSERVER".equalsIgnoreCase(sourceEngine)) {
             return sqlServerService.getSourceDependencies(objectId);
+        } else if ("SYBASE".equalsIgnoreCase(sourceEngine)) {
+            return sybaseService.getSourceDependencies(objectId);
         }
         
         throw new UnsupportedOperationException("Source database engine not supported: " + sourceEngine);

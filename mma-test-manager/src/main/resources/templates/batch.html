@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="_csrf" th:content="${_csrf.token}"/>
+    <meta name="_csrf_header" th:content="${_csrf.headerName}"/>
+    <title>Batch Operations</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <style>
+        .batch-container { max-width: 95%; margin: 0 auto; padding: 20px; }
+        .step-row { display: flex; gap: 15px; align-items: center; margin-bottom: 15px; flex-wrap: wrap; }
+        .step-row label { font-weight: 600; white-space: nowrap; }
+        .step-row select { padding: 6px 12px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 14px; }
+        .object-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+        .object-table th, .object-table td { padding: 6px 10px; border-bottom: 1px solid #f1f5f9; text-align: left; }
+        .object-table th { background: #f8fafc; font-weight: 600; position: sticky; top: 0; }
+        .object-table tr:hover { background: #f8fafc; }
+        .object-list-wrapper { max-height: 400px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px; }
+        .progress-bar { background: #e2e8f0; border-radius: 4px; height: 20px; overflow: hidden; }
+        .progress-fill { background: #3b82f6; height: 100%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-size: 11px; }
+        .job-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+        .job-table th, .job-table td { padding: 6px 10px; border-bottom: 1px solid #f1f5f9; }
+        .job-table th { background: #f8fafc; text-align: left; }
+        .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .badge-running { background: #dbeafe; color: #1d4ed8; }
+        .badge-completed { background: #dcfce7; color: #166534; }
+        .badge-failed { background: #fee2e2; color: #991b1b; }
+        .badge-queued { background: #fef3c7; color: #92400e; }
+        .badge-cancelled { background: #f1f5f9; color: #475569; }
+        .submit-row { display: flex; gap: 15px; align-items: center; margin-top: 12px; padding: 12px; background: #f8fafc; border-radius: 6px; }
+        .type-badge { font-size: 11px; padding: 1px 6px; border-radius: 3px; background: #e2e8f0; color: #475569; }
+    </style>
+</head>
+<body>
+<div class="batch-container">
+    <div class="header">
+        <div class="header-content">
+            <h1>🗂️ MMA Test Manager</h1>
+            <div class="header-nav">
+                <a th:href="@{/project/{id}(id=${projectId})}" class="btn btn-secondary btn-sm">← Back to Project</a>
+                <a th:if="${project != null}" th:href="@{'/project/' + ${project.id} + '/knowledge-base'}" class="btn btn-secondary btn-sm">Project KB</a>
+                <a th:if="${project != null}" th:href="@{'/project/' + ${project.id} + '/batch'}" class="btn btn-secondary btn-sm">⚡ Batch Operations</a>
+                <form method="post" th:action="@{/logout}" style="display: inline;"><button type="submit" class="btn btn-secondary btn-sm">Logout</button></form>
+            </div>
+        </div>
+    </div>
+
+    <div style="margin-top:20px;">
+    <h2 style="margin:0 0 15px 0;">⚡ Batch Operations</h2>
+
+    <!-- Step 1: Operation dropdown -->
+    <div class="step-row">
+        <label>Operation:</label>
+        <select id="operationSelect" onchange="changeOperation(this.value)">
+            <option value="">-- Select Operation --</option>
+            <optgroup label="DDL">
+                <option value="CONVERT_DDL" th:selected="${operation == 'CONVERT_DDL'}">Convert/Fix Target DDL &amp; Apply</option>
+                <option value="REFRESH_SOURCE_DDL" th:selected="${operation == 'REFRESH_SOURCE_DDL'}">Refresh DDL from Source</option>
+                <option value="REFRESH_TARGET_DDL" th:selected="${operation == 'REFRESH_TARGET_DDL'}">Refresh DDL from Target</option>
+            </optgroup>
+            <optgroup label="Comparison Test">
+                <option value="GENERATE_COMPARISON" th:selected="${operation == 'GENERATE_COMPARISON'}">Generate Comparison Tests</option>
+                <option value="RUN_SOURCE" th:selected="${operation == 'RUN_SOURCE'}" th:text="'Run Source Tests (' + ${sourceEngine} + ')'">Run Source Tests</option>
+                <option value="CONVERT_TESTS" th:selected="${operation == 'CONVERT_TESTS'}">Convert Tests to Target</option>
+                <option value="RUN_TARGET" th:selected="${operation == 'RUN_TARGET'}" th:text="'Run Target Tests (' + ${targetEngine} + ')'">Run Target Tests</option>
+                <option value="RESET_COMPARISON" th:selected="${operation == 'RESET_COMPARISON'}">⚠ Reset Comparison Tests</option>
+            </optgroup>
+            <optgroup label="Unit Test">
+                <option value="GENERATE_UNIT" th:selected="${operation == 'GENERATE_UNIT'}" th:text="'Generate ' + ${targetEngine} + ' Unit Tests'">Generate Unit Tests</option>
+                <option value="RUN_UNIT" th:selected="${operation == 'RUN_UNIT'}">Run Unit Tests</option>
+                <option value="RESET_UNIT" th:selected="${operation == 'RESET_UNIT'}">⚠ Reset Unit Tests</option>
+            </optgroup>
+        </select>
+
+        <label>Filter Type:</label>
+        <select id="typeFilter" onchange="changeType(this.value)">
+            <option value="">All Types</option>
+            <option value="PROCEDURE">PROCEDURE</option>
+            <option value="FUNCTION">FUNCTION</option>
+            <option value="SQL_SCALAR_FUNCTION">SQL_SCALAR_FUNCTION</option>
+            <option value="VIEW">VIEW</option>
+            <option value="TRIGGER">TRIGGER</option>
+            <option value="TABLE">TABLE</option>
+        </select>
+
+        <label>Search:</label>
+        <form method="get" th:action="@{/project/{id}/batch(id=${projectId})}" style="display:flex; gap:5px;">
+            <input type="hidden" name="operation" th:value="${operation}"/>
+            <input type="text" name="search" th:value="${search}" placeholder="Object name..." style="padding:5px 10px; border:1px solid #d1d5db; border-radius:4px; width:180px;"/>
+            <button type="submit" class="btn btn-primary btn-sm">Go</button>
+        </form>
+    </div>
+
+    <!-- Step 2: Object list -->
+    <div th:if="${operation != ''}" >
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+            <span style="font-size:13px; color:#64748b;" th:text="${totalElements + ' eligible objects'}"></span>
+            <label style="font-size:13px;"><input type="checkbox" id="selectAll" onchange="toggleAll(this)"/> Select All</label>
+        </div>
+        <div class="object-list-wrapper">
+            <table class="object-table">
+                <thead>
+                    <tr>
+                        <th style="width:30px;"></th>
+                        <th>Source Object</th>
+                        <th>Target Object</th>
+                        <th>Type</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr th:each="obj : ${objects}">
+                        <td><input type="checkbox" class="obj-check" th:value="${obj.id}"/></td>
+                        <td style="font-family:monospace; font-size:12px;" th:text="${obj.sourceSchemaName + '.' + obj.sourceObjectName}"></td>
+                        <td style="font-family:monospace; font-size:12px;" th:text="${obj.targetSchemaName != null ? obj.targetSchemaName + '.' + obj.targetObjectName : '—'}"></td>
+                        <td><span class="type-badge" th:text="${obj.sourceObjectType}"></span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div style="display:flex; justify-content:center; gap:5px; margin-top:8px;" th:if="${totalPages > 1}">
+            <button class="btn btn-secondary btn-sm" th:if="${currentPage > 0}"
+                    th:onclick="'location.href=\'' + @{/project/{id}/batch(id=${projectId},operation=${operation},search=${search},page=${currentPage - 1})} + '\''">← Prev</button>
+            <span style="padding:5px 10px; font-size:13px;">Page <strong th:text="${currentPage + 1}"></strong> / <strong th:text="${totalPages}"></strong></span>
+            <button class="btn btn-secondary btn-sm" th:if="${currentPage + 1 < totalPages}"
+                    th:onclick="'location.href=\'' + @{/project/{id}/batch(id=${projectId},operation=${operation},search=${search},page=${currentPage + 1})} + '\''">Next →</button>
+        </div>
+
+        <!-- Submit row -->
+        <div class="submit-row">
+            <label>Priority:</label>
+            <input type="number" id="priority" value="50" min="0" max="99" style="width:60px; padding:4px 8px; border:1px solid #d1d5db; border-radius:4px;"/>
+            <span style="font-size:11px; color:#64748b;">(0=highest, 99=lowest)</span>
+            <button class="btn btn-primary" onclick="submitBatch()">Submit Batch</button>
+        </div>
+    </div>
+
+    <!-- Recent Jobs -->
+    <h3 style="margin-top:25px;">Recent Batches</h3>
+    <table class="job-table" th:if="${!#lists.isEmpty(recentJobs)}">
+        <thead><tr><th>#</th><th>Operation</th><th>Items</th><th>Priority</th><th>Submitted</th><th>Progress</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+            <tr th:each="job : ${recentJobs}">
+                <td><a th:href="@{'/project/' + ${projectId} + '/batch/' + ${job.id}}" th:text="${job.id}"></a></td>
+                <td th:text="${job.operation}"></td>
+                <td th:text="${job.totalItems}"></td>
+                <td th:text="${job.priority}"></td>
+                <td style="font-size:11px;" th:text="${(job.submittedBy != null ? job.submittedBy : '—') + ' / ' + #temporals.format(job.createdAt, 'MM-dd HH:mm')}"></td>
+                <td style="width:120px;">
+                    <div class="progress-bar"><div class="progress-fill" th:with="pct=${job.totalItems != 0 ? (job.completedItems + job.failedItems) * 100 / job.totalItems : 0}" th:style="'width: ' + ${pct} + '%'" th:text="${pct} + '%'"></div></div>
+                </td>
+                <td><span class="badge" th:classappend="${job.status == 'RUNNING' ? 'badge-running' : job.status == 'COMPLETED' ? 'badge-completed' : job.status == 'FAILED' ? 'badge-failed' : job.status == 'CANCELLED' ? 'badge-cancelled' : 'badge-queued'}" th:text="${job.status}"></span></td>
+                <td><button th:if="${job.status == 'RUNNING' || job.status == 'QUEUED'}" class="btn btn-secondary btn-sm" th:onclick="'cancelJob(' + ${job.id} + ')'">Cancel</button></td>
+            </tr>
+        </tbody>
+    </table>
+    <div th:if="${#lists.isEmpty(recentJobs)}" style="color:#64748b; font-size:13px;">No batch jobs yet.</div>
+    <div style="display:flex; justify-content:center; gap:5px; margin-top:8px;" th:if="${totalJobPages > 1}">
+        <button class="btn btn-secondary btn-sm" th:if="${jobPage > 0}"
+                th:onclick="'location.href=\'' + @{/project/{id}/batch(id=${projectId},operation=${operation},jobPage=${jobPage - 1})} + '\''">← Prev</button>
+        <span style="padding:5px 10px; font-size:13px;">Page <strong th:text="${jobPage + 1}"></strong> / <strong th:text="${totalJobPages}"></strong></span>
+        <button class="btn btn-secondary btn-sm" th:if="${jobPage + 1 < totalJobPages}"
+                th:onclick="'location.href=\'' + @{/project/{id}/batch(id=${projectId},operation=${operation},jobPage=${jobPage + 1})} + '\''">Next →</button>
+    </div>
+
+    <!-- Live status -->
+    <div id="liveStatus" style="display:none; margin-top:15px; border:1px solid #3b82f6; border-radius:6px; padding:12px;">
+        <h4 id="liveTitle" style="margin:0 0 8px 0;"></h4>
+        <div class="progress-bar"><div class="progress-fill" id="liveProgress" style="width:0%">0%</div></div>
+        <div id="liveItems" style="margin-top:8px; max-height:200px; overflow-y:auto; font-size:12px;"></div>
+    </div>
+</div>
+
+<script th:inline="javascript">
+    const contextPath = /*[[@{/}]]*/ '';
+    const projectId = /*[[${projectId}]]*/ '';
+    const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+    const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+
+    function changeOperation(val) {
+        if (val) location.href = contextPath + 'project/' + projectId + '/batch?operation=' + val;
+    }
+    function changeType(val) {
+        const op = document.getElementById('operationSelect').value;
+        location.href = contextPath + 'project/' + projectId + '/batch?operation=' + op + '&search=' + val;
+    }
+    function toggleAll(cb) {
+        document.querySelectorAll('.obj-check').forEach(c => c.checked = cb.checked);
+    }
+    function submitBatch() {
+        const op = document.getElementById('operationSelect').value;
+        if (!op) { alert('Select an operation'); return; }
+        const selected = [...document.querySelectorAll('.obj-check:checked')].map(c => c.value);
+        if (!selected.length) { alert('Select at least one object'); return; }
+        const priority = document.getElementById('priority').value;
+
+        showWorking('Submitting batch...');
+        fetch(contextPath + 'project/' + projectId + '/batch/submit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', [csrfHeader]: csrfToken },
+            body: 'operation=' + op + '&priority=' + priority + '&' + selected.map(id => 'objectIds=' + id).join('&')
+        }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(data => {
+            hideWorking();
+            if (data.jobId) {
+                document.getElementById('liveStatus').style.display = 'block';
+                pollStatus(data.jobId);
+            } else { alert('Submit failed: ' + JSON.stringify(data)); }
+        }).catch(err => { hideWorking(); alert('Error: ' + err); });
+    }
+    function pollStatus(jobId) {
+        const interval = setInterval(() => {
+            fetch(contextPath + 'project/' + projectId + '/batch/' + jobId + '/status')
+                .then(r => r.json()).then(data => {
+                    document.getElementById('liveTitle').textContent = data.operation + ' — ' + data.status + ' (' + (data.success + data.failed) + '/' + data.total + ')';
+                    document.getElementById('liveProgress').style.width = data.progress + '%';
+                    document.getElementById('liveProgress').textContent = data.progress + '%';
+                    document.getElementById('liveItems').innerHTML = data.items.map(i =>
+                        '<div>' + (i.status==='SUCCESS'?'✅':i.status==='FAILED'?'❌':i.status==='RUNNING'?'⏳':'⬜') +
+                        ' ' + i.objectName + (i.status==='FAILED'&&i.message?' <span style="color:#dc2626">'+i.message.substring(0,60)+'</span>':'') + '</div>'
+                    ).join('');
+                    if (data.status !== 'RUNNING' && data.status !== 'QUEUED') {
+                        clearInterval(interval);
+                        setTimeout(() => location.reload(), 1500);
+                    }
+                });
+        }, 3000);
+    }
+    function cancelJob(jobId) {
+        fetch(contextPath + 'project/' + projectId + '/batch/' + jobId + '/cancel', {
+            method: 'POST', headers: { [csrfHeader]: csrfToken }
+        }).then(() => location.reload());
+    }
+    function showWorking(msg) {
+        let el = document.getElementById('workingOverlay');
+        if (!el) { el = document.createElement('div'); el.id = 'workingOverlay'; el.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.3);z-index:9999;display:flex;align-items:center;justify-content:center;'; document.body.appendChild(el); }
+        el.innerHTML = '<div style="background:white;padding:20px 40px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.2);font-size:16px;"><span style="display:inline-block;width:16px;height:16px;border:2px solid #ccc;border-top-color:#333;border-radius:50%;animation:spin .6s linear infinite;margin-right:8px;vertical-align:middle;"></span>' + msg + '</div>';
+        el.style.display = 'flex';
+    }
+    function hideWorking() { const el = document.getElementById('workingOverlay'); if (el) el.style.display = 'none'; }
+</script>
+<style>@keyframes spin{to{transform:rotate(360deg);}}</style>
+</body>
+</html>

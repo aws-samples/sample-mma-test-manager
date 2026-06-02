@@ -29,7 +29,8 @@
             <h1>🗂️ MMA Test Manager</h1>
             <div class="header-nav">
                 <a th:href="@{/}" class="btn btn-secondary btn-sm">← Back to Projects</a>
-                <a th:if="${project != null}" th:href="@{'/project/' + ${project.id} + '/knowledge-base'}" class="btn btn-secondary btn-sm">Project Knowledge Base</a>
+                <a th:if="${project != null}" th:href="@{'/project/' + ${project.id} + '/knowledge-base'}" class="btn btn-secondary btn-sm">Project KB</a>
+                <a th:if="${project != null}" th:href="@{'/project/' + ${project.id} + '/batch'}" class="btn btn-secondary btn-sm">⚡ Batch Operations</a>
                 <form method="post" th:action="@{/logout}" style="display: inline;">
                     <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
                 </form>
@@ -44,9 +45,9 @@
             </div>
 
             <div class="tabs">
-                <a th:href="@{/project/{id}(id=${projectId},tab='code',showComplete=${showComplete},showIgnored=${showIgnored})}" 
+                <a th:href="@{/project/{id}(id=${projectId},tab='code',showComplete=${showComplete},showIgnored=${showIgnored},search=${search})}" 
                    th:class="${tab == 'code' ? 'tab active' : 'tab'}">📦 Code Objects</a>
-                <a th:href="@{/project/{id}(id=${projectId},tab='other',showComplete=${showComplete},showIgnored=${showIgnored})}" 
+                <a th:href="@{/project/{id}(id=${projectId},tab='other',showComplete=${showComplete},showIgnored=${showIgnored},search=${search})}" 
                    th:class="${tab == 'other' ? 'tab active' : 'tab'}">📋 Other Objects</a>
             </div>
 

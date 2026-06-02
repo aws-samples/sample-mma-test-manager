@@ -11,6 +11,7 @@ import com.mma.testmanager.service.DdlService;
 import com.mma.testmanager.service.S3LoaderService;
 import com.mma.testmanager.service.OracleCommonService;
 import com.mma.testmanager.service.SQLServerCommonService;
+import com.mma.testmanager.service.SybaseCommonService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.info.BuildProperties;
@@ -38,6 +39,7 @@ public class TestManagerController {
     private final com.mma.testmanager.service.DependencyService dependencyService;
     private final OracleCommonService oracleService;
     private final SQLServerCommonService sqlServerService;
+    private final SybaseCommonService sybaseService;
     private final com.mma.testmanager.repository.ProjectKnowledgeBaseRepository projectKnowledgeBaseRepository;
     private final com.mma.testmanager.repository.KnowledgeBaseRepository knowledgeBaseRepository;
     private final com.mma.testmanager.repository.TestCaseRepository testCaseRepository;
@@ -112,6 +114,10 @@ public class TestManagerController {
                 connectionString = String.format("mysql -h %s -P %s -D %s -u %s", host, port, dbname, username);
                 iconPath = "/images/mysql.png";
                 engineName = "MySQL";
+            } else if ("sybase".equalsIgnoreCase(engine)) {
+                connectionString = String.format("isql -S %s:%s -U %s -D %s", host, port, username, dbname);
+                iconPath = "/images/sybase.png";
+                engineName = "Sybase ASE";
             } else {
                 connectionString = String.format("%s://%s:%s/%s (user: %s)", engine, host, port, dbname, username);
                 iconPath = "/images/convert.png";
@@ -206,6 +212,10 @@ public class TestManagerController {
                 codeTypes.add("SQL_TABLE_VALUED_FUNCTION");
             }
             
+            if ("sybase".equalsIgnoreCase(sourceDbEngine)) {
+                codeTypes.add("SQL_SCALAR_FUNCTION");
+            }
+            
             objectTypes = codeTypes;
             excludeTypes = null;
         } else {
@@ -226,11 +236,18 @@ public class TestManagerController {
                 ));
             }
             
+            // Add Sybase code types
+            if ("sybase".equalsIgnoreCase(sourceDbEngine)) {
+                excludeList.add("SQL_SCALAR_FUNCTION");
+            }
+            
             // Add metadata/folder types based on source engine
             if ("oracle".equalsIgnoreCase(sourceDbEngine)) {
                 excludeList.addAll(oracleService.getOracleMetadataTypes());
             } else if ("sqlserver".equalsIgnoreCase(sourceDbEngine)) {
                 excludeList.addAll(sqlServerService.getSQLServerMetadataTypes());
+            } else if ("sybase".equalsIgnoreCase(sourceDbEngine)) {
+                excludeList.addAll(sybaseService.getSybaseMetadataTypes());
             }
             
             excludeTypes = excludeList;
@@ -718,6 +735,7 @@ public class TestManagerController {
         if ("postgres".equalsIgnoreCase(engine) || "postgresql".equalsIgnoreCase(engine)) return "PostgreSQL";
         if ("sqlserver".equalsIgnoreCase(engine)) return "SQL Server";
         if ("mysql".equalsIgnoreCase(engine)) return "MySQL";
+        if ("sybase".equalsIgnoreCase(engine)) return "Sybase ASE";
         return engine.toUpperCase();
     }
     
@@ -727,6 +745,7 @@ public class TestManagerController {
         if ("postgres".equalsIgnoreCase(engine) || "postgresql".equalsIgnoreCase(engine)) return "postgres";
         if ("sqlserver".equalsIgnoreCase(engine)) return "sqlserver";
         if ("mysql".equalsIgnoreCase(engine)) return "mysql";
+        if ("sybase".equalsIgnoreCase(engine)) return "sybase";
         return engine.toLowerCase();
     }
     

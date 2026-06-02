@@ -26,6 +26,7 @@ public class S3LoaderService {
     private final DatabaseEndpointService endpointService;
     private final OracleCommonService oracleService;
     private final SQLServerCommonService sqlServerService;
+    private final SybaseCommonService sybaseService;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, String> progressMap = new ConcurrentHashMap<>();
     
@@ -122,6 +123,9 @@ public class S3LoaderService {
                         if ("sqlserver".equalsIgnoreCase(sourceEngine) && sqlServerService.isSQLServerMetadataType(metaType)) {
                             continue;
                         }
+                        if ("sybase".equalsIgnoreCase(sourceEngine) && sybaseService.isSybaseMetadataType(metaType)) {
+                            continue;
+                        }
                         
                         JsonNode locator = item.path("locator");
                         String schema = locator.path("schema-name").asText();
@@ -129,6 +133,10 @@ public class S3LoaderService {
                         String sourceId = item.path("id").asText();
                         
                         if (!metaType.isEmpty() && !name.isEmpty() && !sourceId.isEmpty()) {
+                            // Skip Sybase system catalog objects
+                            if ("sybase".equalsIgnoreCase(sourceEngine) && sybaseService.isSybaseSystemObject(name)) {
+                                continue;
+                            }
                             // Use sourceId as the unique key to support overloading
                             String mapKey = sourceId.toUpperCase();
                             

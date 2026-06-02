@@ -1,0 +1,5 @@
+# Gitleaks ignore file
+# These are example/demo configuration files with placeholder values
+
+# Demo AWS Secrets Manager ARN in example configuration file (line 18: mma.repo.secret=arn:aws:secretsmanager:...)
+bfaeb99015324c9fe01ae6217cebf36c894d98de:mma-test-manager/application-secretsmanager.properties:generic-api-key:18
