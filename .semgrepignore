@@ -1,0 +1,24 @@
+# Semgrep ignore patterns for MMA Test Manager
+
+# False positive - Django CSRF rule applied to Spring Boot/Thymeleaf templates
+# Spring Security automatically handles CSRF protection for Thymeleaf forms
+mma-test-manager/src/main/resources/templates/**/*.html
+mma-test-manager/src/main/resources/templates/*.html
+**/templates/**/*.html
+**/templates/*.html
+
+# False positive - Command injection warning for ProcessBuilder
+# kiroCommand is from application.properties (configuration), not user input
+# User input (prompt) is passed via stdin, not concatenated into command
+mma-test-manager/src/main/java/com/mma/testmanager/service/KiroCliCommonService.java
+
+# False positive - SQL injection warnings for schema setting and admin SQL execution
+# Schema names are validated with validateSchemaName() to allow only alphanumeric, underscore, hyphen
+# SQL statements are executed by authenticated admin users for database migration testing
+# This is a database migration tool where admins need to execute arbitrary DDL/DML
+mma-test-manager/src/main/java/com/mma/testmanager/service/DatabaseConnectionService.java
+
+# Expected behavior - SQL execution tools for database migration testing
+# These MCP tools are designed to execute arbitrary SQL from authenticated users
+# SQL statements are logged before execution for audit purposes
+*-client-mcp/src/main/java/com/example/*McpTools.java

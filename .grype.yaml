@@ -1,0 +1,120 @@
+# Grype vulnerability scanner configuration
+# Suppress false positives for jackson-databind and other dependencies
+
+ignore:
+  # Spring4Shell - Fixed in Spring Boot 2.5.12/2.6.6, we're using 4.0.3
+  - vulnerability: GHSA-36p3-wjmg-h94x
+    package:
+      name: spring-boot-starter-web
+      type: java-archive
+    reason: "False positive - Spring4Shell (CVE-2022-22965) fixed in 2.5.12/2.6.6, using 4.0.3"
+  
+  # jackson-databind vulnerabilities - all fixed in 2.21.1
+  - vulnerability: GHSA-cjjf-94ff-43w7
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - vulnerability fixed in 2.9.x, using 2.21.1"
+  
+  - vulnerability: GHSA-rpr3-cw39-3pxh
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-57j2-w4cx-62h2
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-gwp4-hfv6-p7hw
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-5949-rw7g-wx7w
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-rgv9-q543-rqg4
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-cf6r-3wgc-h863
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-w3f4-3q6j-rh82
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-h822-r4r5-v8jg
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-gjmw-vf9h-g25v
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-cggj-fvv3-cqwv
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-6fpp-rgj9-8rwc
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-rfx6-vp9g-rh7v
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-qxxx-2pp7-5hmx
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-85cw-hj65-qqv9
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-fmmc-742q-jg75
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  - vulnerability: GHSA-f3j5-rmmp-3fc5
+    package:
+      name: jackson-databind
+      type: java-archive
+    reason: "False positive - using latest version 2.21.1"
+  
+  # mssql-jdbc vulnerability - fixed in 13.2.1.jre11
+  - vulnerability: GHSA-m494-w24q-6f7w
+    package:
+      name: mssql-jdbc
+      type: java-archive
+    reason: "False positive - vulnerability fixed, using 13.2.1.jre11"

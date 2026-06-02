@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
     
     <groupId>com.example</groupId>
-    <artifactId>sqlserver-mcp-server</artifactId>
+    <artifactId>sybase-mcp-server</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
     
@@ -48,9 +48,9 @@
             <version>${spring.boot.version}</version>
         </dependency>
         <dependency>
-            <groupId>com.microsoft.sqlserver</groupId>
-            <artifactId>mssql-jdbc</artifactId>
-            <version>13.4.0.jre11</version>
+            <groupId>com.sybase</groupId>
+            <artifactId>jconn42</artifactId>
+            <version>16.0.SP04</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -91,11 +91,19 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <version>${spring.boot.version}</version>
                 <configuration>
-                    <mainClass>com.example.MssqlMcpServerApplication</mainClass>
+                    <mainClass>com.example.SybaseMcpServerApplication</mainClass>
                 </configuration>
                 <executions>
                     <execution>

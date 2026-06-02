@@ -1,6 +1,6 @@
 {
   "name": "mma-agent",
-  "description": "Agent with all MMA MCP servers for database migration operations",
+  "description": "Agent with MMA MCP servers for Sybase ASE to Aurora PostgreSQL migration",
   "prompt": null,
   "mcpServers": {
     "postgres-client-mcp": {
@@ -14,13 +14,13 @@
       "timeout": 300000,
       "disabled": false
     },
-    "oracle-client-mcp": {
+    "sybase-client-mcp": {
       "type": "stdio",
       "command": "java",
       "args": [
         "-jar",
-        "/workshop/MMA-Samples/oracle-client-mcp/target/oracle-mcp-server-1.0.0.jar",
-        "--spring.config.location=/workshop/MMA-Samples/oracle-client-mcp/application-secretsmanager.properties"
+        "/workshop/MMA-Samples/sybase-client-mcp/target/sybase-mcp-server-1.0.0.jar",
+        "--spring.config.location=/workshop/MMA-Samples/sybase-client-mcp/application-secretsmanager.properties"
       ],
       "timeout": 300000,
       "disabled": false
@@ -38,10 +38,10 @@
     "todo",
     "delegate",
     "@postgres-client-mcp",
-    "@oracle-client-mcp"
-    ],
+    "@sybase-client-mcp"
+  ],
   "toolAliases": {},
-  "allowedTools": [    
+  "allowedTools": [
     "read",
     "write",
     "shell",
@@ -53,7 +53,7 @@
     "todo",
     "delegate",
     "@postgres-client-mcp",
-    "@oracle-client-mcp"
+    "@sybase-client-mcp"
   ],
   "resources": [
     "file://AGENTS.md",

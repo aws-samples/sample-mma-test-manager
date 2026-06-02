@@ -22,7 +22,7 @@
         <div class="header-content">
             <h1><img th:src="@{/images/dependencies.png}" alt="Dependencies" style="width: 32px; height: 32px; vertical-align: middle;"> Object Dependencies</h1>
             <div class="header-nav">
-                <a th:href="@{/project/{id}(id=${object.projectId})}" class="btn btn-secondary btn-sm">← Back to Project</a>
+                <a th:href="@{/project/{id}(id=${object.projectId})}" class="btn btn-secondary btn-sm" onclick="event.preventDefault(); history.back();">← Back to Project</a>
                 <form method="post" th:action="@{/logout}" style="display: inline;">
                     <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
                 </form>

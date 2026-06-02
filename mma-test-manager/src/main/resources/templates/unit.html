@@ -22,7 +22,7 @@
         <div class="header-content">
             <h1><img th:src="@{/images/unit-test.png}" alt="Unit Test" style="width: 32px; height: 32px; vertical-align: middle;"> <span th:text="${targetEngine}">Target</span> Unit Test</h1>
             <div class="header-nav">
-                <a th:href="@{/project/{id}(id=${object.projectId})}" class="btn btn-secondary btn-sm">← Back to Project</a>
+                <a th:href="@{/project/{id}(id=${object.projectId})}" class="btn btn-secondary btn-sm" onclick="event.preventDefault(); history.back();">← Back to Project</a>
                 <form method="post" th:action="@{/logout}" style="display: inline;">
                     <button type="submit" class="btn btn-secondary btn-sm">Logout</button>
                 </form>
@@ -172,16 +172,14 @@
         let currentFixTargetTestCaseId = null;
         
         function showAlert(message) {
-            alert(message);
-            if (message.startsWith('SUCCESS') || message.includes('successfully')) {
-                location.reload();
-            }
+            location.reload();
         }
         
         const targetEngine = '[[${targetEngine}]]';
         
         function generateTests(objectId) {
             if (!confirm('Generate 3 ' + targetEngine + ' unit test cases?')) return;
+            showWorking('Generating unit tests...');
             fetch(contextPath + 'unit/' + objectId + '/generate', { 
                 method: 'POST',
                 headers: { [csrfHeader]: csrfToken }
@@ -190,10 +188,12 @@
                 .then(data => {
                     showAlert(data);
                     location.reload();
-                });
+                })
+                .catch(err => { hideWorking(); alert('Error: ' + err); });
         }
         
         function executePG(testCaseId) {
+            showWorking('Executing test...');
             fetch(contextPath + 'unit/' + testCaseId + '/execute', { 
                 method: 'POST',
                 headers: { [csrfHeader]: csrfToken }
@@ -353,6 +353,25 @@
                 location.reload();
             });
         }
+
+        function showWorking(msg) {
+            let el = document.getElementById('workingOverlay');
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'workingOverlay';
+                el.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.3);z-index:9999;display:flex;align-items:center;justify-content:center;';
+                el.innerHTML = '<div style="background:white;padding:20px 40px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.2);font-size:16px;"><span class="spinner"></span> ' + msg + '</div>';
+                document.body.appendChild(el);
+            } else {
+                el.querySelector('div').innerHTML = '<span class="spinner"></span> ' + msg;
+                el.style.display = 'flex';
+            }
+        }
+        function hideWorking() {
+            const el = document.getElementById('workingOverlay');
+            if (el) el.style.display = 'none';
+        }
     </script>
+    <style>.spinner{display:inline-block;width:16px;height:16px;border:2px solid #ccc;border-top-color:#333;border-radius:50%;animation:spin .6s linear infinite;margin-right:8px;vertical-align:middle;}@keyframes spin{to{transform:rotate(360deg);}}</style>
 </body>
 </html>

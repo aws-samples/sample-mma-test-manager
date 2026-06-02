@@ -256,12 +256,11 @@ public class ComparisonTestService {
             "3. Complex scenario\n\n" +
             "For each test case provide:\n" +
             "- Test number (%d, %d, %d)\n" +
-            "- Description (max 200 characters)\n" +
-            "- Scenario type (max 200 characters)\n" +
+            "- Description\n" +
+            "- Scenario type\n" +
             "- SQL statement to execute (use full qualified name: %s)\n\n" +
             "DDL:\n%s\n\n" +
-            "IMPORTANT: Keep description and scenario concise and under 200 characters each.\n" +
-            "Return ONLY valid JSON array with NO additional text.\n" +
+            "IMPORTANT: Return ONLY valid JSON array with NO additional text.\n" +
             "Format: [{\"test_number\":\"%d\",\"description\":\"...\",\"scenario\":\"...\",\"sql\":\"...\"}]\n" +
             "Wrap your response with markers:\n" +
             "<<<JSON_START>>>\n" +
@@ -307,6 +306,8 @@ public class ComparisonTestService {
             result = dbConnectionService.executeOracleTestWithTestUser(obj.getSourceSchemaName(), tc.getSourceSql());
         } else if ("sqlserver".equalsIgnoreCase(sourceEngine)) {
             result = dbConnectionService.executeSqlServerTestWithTestUser(obj.getSourceSchemaName(), tc.getSourceSql());
+        } else if ("sybase".equalsIgnoreCase(sourceEngine)) {
+            result = dbConnectionService.executeSybaseTestWithTestUser(obj.getSourceSchemaName(), tc.getSourceSql());
         } else {
             throw new UnsupportedOperationException("Source engine not supported: " + sourceEngine);
         }

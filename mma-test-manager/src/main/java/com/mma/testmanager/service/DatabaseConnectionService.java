@@ -19,13 +19,16 @@ public class DatabaseConnectionService {
     private final PostgresCommonService postgresCommonService;
     private final OracleCommonService oracleCommonService;
     private final SQLServerCommonService sqlServerCommonService;
+    private final SybaseCommonService sybaseCommonService;
     
     public DatabaseConnectionService(PostgresCommonService postgresCommonService,
                                     OracleCommonService oracleCommonService,
-                                    SQLServerCommonService sqlServerCommonService) {
+                                    SQLServerCommonService sqlServerCommonService,
+                                    SybaseCommonService sybaseCommonService) {
         this.postgresCommonService = postgresCommonService;
         this.oracleCommonService = oracleCommonService;
         this.sqlServerCommonService = sqlServerCommonService;
+        this.sybaseCommonService = sybaseCommonService;
     }
     
     @Value("${mma.sourcedb.connection.type:secretsmanager}")
@@ -76,6 +79,16 @@ public class DatabaseConnectionService {
     }
     
     // Admin connection - read-only queries with rollback
+    public Map<String, Object> executeSybaseQuery(String schema, String sql) {
+        Map<String, String> credentials = getCredentials(sourceDbConnectionType, sourceDbSecretArn);
+        String jdbcUrl = String.format("jdbc:sybase:Tds:%s:%s/%s", 
+            credentials.get("host"), credentials.get("port"), credentials.get("dbname"));
+        
+        return executeSimpleQuery(jdbcUrl, credentials.get("username"), credentials.get("password"), 
+            schema, sql, "sybase");
+    }
+    
+    // Admin connection - read-only queries with rollback
     public Map<String, Object> executePostgresQuery(String schema, String sql) {
         Map<String, String> credentials = getCredentials(targetDbConnectionType, targetDbSecretArn);
         String jdbcUrl = String.format("jdbc:postgresql://%s:%s/%s", 
@@ -103,6 +116,16 @@ public class DatabaseConnectionService {
         
         return executeTest(jdbcUrl, credentials.get("username"), credentials.get("password"), 
             schema, sql, "sqlserver");
+    }
+    
+    // Test user connection - read-only with rollback
+    public Map<String, Object> executeSybaseTestWithTestUser(String schema, String sql) {
+        Map<String, String> credentials = getCredentials(sourceDbTestType, sourceDbTestSecretArn);
+        String jdbcUrl = String.format("jdbc:sybase:Tds:%s:%s/%s", 
+            credentials.get("host"), credentials.get("port"), credentials.get("dbname"));
+        
+        return executeTest(jdbcUrl, credentials.get("username"), credentials.get("password"), 
+            schema, sql, "sybase");
     }
     
     // Test user connection - read-only with rollback
@@ -357,6 +380,8 @@ public class DatabaseConnectionService {
                 return oracleCommonService.splitSqlStatements(sql);
             case "sqlserver":
                 return sqlServerCommonService.splitSqlStatements(sql);
+            case "sybase":
+                return sybaseCommonService.splitSqlStatements(sql);
             default:
                 return Arrays.stream(sql.split(";"))
                     .map(String::trim)
@@ -438,6 +463,8 @@ public class DatabaseConnectionService {
             return String.format("jdbc:sqlserver://%s:%s;databaseName=%s", host, port, dbname);
         } else if ("mysql".equalsIgnoreCase(engine)) {
             return String.format("jdbc:mysql://%s:%s/%s", host, port, dbname);
+        } else if ("sybase".equalsIgnoreCase(engine)) {
+            return String.format("jdbc:sybase:Tds:%s:%s/%s", host, port, dbname);
         } else {
             throw new IllegalArgumentException("Unsupported database engine: " + engine);
         }
@@ -475,6 +502,9 @@ public class DatabaseConnectionService {
                 break;
             case "mysql":
                 Class.forName("com.mysql.cj.jdbc.Driver");
+                break;
+            case "sybase":
+                Class.forName("com.sybase.jdbc42.jdbc.SybDriver");
                 break;
             default:
                 throw new IllegalArgumentException("Unsupported database engine: " + engine);

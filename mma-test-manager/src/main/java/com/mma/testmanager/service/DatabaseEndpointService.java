@@ -137,6 +137,7 @@ public class DatabaseEndpointService {
             case "POSTGRESQL", "AURORA_POSTGRESQL" -> "postgres";
             case "MYSQL", "AURORA_MYSQL" -> "mysql";
             case "MSSQL" -> "sqlserver";
+            case "SYBASE_ASE", "SYBASE" -> "sybase";
             default -> vendorName.toLowerCase();
         };
     }

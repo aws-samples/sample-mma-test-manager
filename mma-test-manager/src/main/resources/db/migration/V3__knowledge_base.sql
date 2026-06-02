@@ -29,7 +29,9 @@ VALUES
    - Convert Oracle exceptions to PostgreSQL RAISE statements
    - Map Oracle error codes to PostgreSQL equivalents
 
-5. Preserve all mathematical operators: *, +, -, /, etc.',
+5. Preserve all mathematical operators: *, +, -, /, etc.
+
+6. Fix this PostgreSQL procedure/function code. Preserve all existing parameter names and data types exactly as they are.',
     TRUE,
     10,
     NOW(),
@@ -179,7 +181,9 @@ VALUES
 7. Error Logging Pattern:
    - Capture error details with GET STACKED DIAGNOSTICS in EXCEPTION block
    - Pass captured variables to helper function for INSERT
-   - Use COMMIT before RAISE to persist error log',
+   - Use COMMIT before RAISE to persist error log
+
+8. Fix this PostgreSQL procedure/function code. Preserve all existing parameter names and data types exactly as they are.',
     TRUE,
     10,
     NOW(),
@@ -439,3 +443,219 @@ SELECT id, cat FROM knowledge_bases, (VALUES ('UNIT_TEST'), ('COMPARISON_TEST'))
 WHERE name = 'Procedure Testing with Transaction Rollback - SQL Server to PostgreSQL'
 ON CONFLICT DO NOTHING;
 
+
+-- Sybase ASE to PostgreSQL Knowledge Bases
+
+INSERT INTO knowledge_bases (name, description, source_db_engine, target_db_engine, content, active, priority, created_at, updated_at)
+VALUES 
+(
+    'Sybase ASE to PostgreSQL DDL Conversion Best Practices',
+    'General guidelines for converting Sybase ASE DDL to PostgreSQL',
+    'sybase',
+    'postgres',
+    'Best Practices for Sybase ASE to PostgreSQL DDL Conversion:
+
+1. Data Type Mappings:
+   - INT/INTEGER → INTEGER
+   - SMALLINT → SMALLINT
+   - TINYINT → SMALLINT (PostgreSQL has no TINYINT)
+   - BIGINT → BIGINT
+   - NUMERIC/DECIMAL → NUMERIC/DECIMAL
+   - FLOAT → DOUBLE PRECISION
+   - REAL → REAL
+   - MONEY/SMALLMONEY → NUMERIC(19,4) / NUMERIC(10,4)
+   - VARCHAR → VARCHAR
+   - CHAR → CHAR
+   - TEXT → TEXT
+   - NVARCHAR/NCHAR → VARCHAR/CHAR (PostgreSQL is UTF-8 native)
+   - DATETIME/SMALLDATETIME → TIMESTAMP
+   - DATE → DATE
+   - TIME → TIME
+   - BIT → BOOLEAN
+   - IMAGE → BYTEA
+   - BINARY/VARBINARY → BYTEA
+   - UNIQUEIDENTIFIER → UUID
+
+2. Syntax Conversions:
+   - GETDATE() → CURRENT_TIMESTAMP or NOW()
+   - ISNULL(a, b) → COALESCE(a, b)
+   - CONVERT(type, expr) → CAST(expr AS type)
+   - DATALENGTH() → OCTET_LENGTH()
+   - LEN() → LENGTH()
+   - CHARINDEX(sub, str) → POSITION(sub IN str)
+   - SUBSTRING(str, start, len) → SUBSTRING(str FROM start FOR len)
+   - DATEADD(unit, n, date) → date + INTERVAL
+   - DATEDIFF(unit, start, end) → EXTRACT(EPOCH FROM end - start) or DATE_PART
+   - TOP n → LIMIT n
+   - @@IDENTITY → lastval() or RETURNING clause
+   - @@ROWCOUNT → GET DIAGNOSTICS var = ROW_COUNT
+   - PRINT → RAISE NOTICE
+
+3. Procedure/Function Conversion:
+   - CREATE PROCEDURE → CREATE OR REPLACE PROCEDURE ... LANGUAGE plpgsql AS $$
+   - CREATE FUNCTION → CREATE OR REPLACE FUNCTION ... RETURNS type LANGUAGE plpgsql AS $$
+   - AS BEGIN...END → AS $$ BEGIN...END; $$
+   - DECLARE inside body, not before AS
+   - OUTPUT parameters → INOUT parameters
+   - EXEC proc_name → CALL proc_name()
+   - SELECT @var = expr → var := expr or SELECT expr INTO var
+
+4. Control Flow:
+   - IF...ELSE → IF...ELSE (same)
+   - WHILE → WHILE...LOOP...END LOOP
+   - BEGIN...END → BEGIN...END (within $$ blocks)
+   - RETURN → RETURN (functions) or just RETURN (procedures)
+   - GOTO → Not supported (restructure logic)
+
+5. Error Handling:
+   - BEGIN TRY/BEGIN CATCH → EXCEPTION WHEN OTHERS THEN
+   - RAISERROR → RAISE EXCEPTION
+   - @@ERROR → Use EXCEPTION block
+   - ERROR_MESSAGE() → SQLERRM or GET STACKED DIAGNOSTICS
+
+6. Cursor Handling:
+   - DECLARE CURSOR → DECLARE cursor_name CURSOR FOR
+   - OPEN/FETCH/CLOSE → Same pattern in PostgreSQL
+   - DEALLOCATE → Not needed in PostgreSQL
+   - FETCH NEXT FROM cursor INTO @var → FETCH NEXT FROM cursor INTO var
+
+7. Temporary Tables:
+   - #temp_table → CREATE TEMP TABLE temp_table
+   - @table_variable → CREATE TEMP TABLE or use arrays
+
+8. Identity Columns:
+   - IDENTITY(1,1) → GENERATED ALWAYS AS IDENTITY or SERIAL
+
+9. Fix this PostgreSQL procedure/function code. Preserve all existing parameter names and data types exactly as they are.
+
+10. Preserve all mathematical operators: *, +, -, /, etc.',
+    TRUE,
+    10,
+    NOW(),
+    NOW()
+)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO knowledge_base_categories (knowledge_base_id, category) 
+SELECT id, 'DDL_CONVERSION' FROM knowledge_bases WHERE name = 'Sybase ASE to PostgreSQL DDL Conversion Best Practices'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO knowledge_bases (name, description, source_db_engine, target_db_engine, content, active, priority, created_at, updated_at)
+VALUES 
+(
+    'Use MCP Servers for Realistic Test Data - Sybase to PostgreSQL',
+    'Guidelines for using MCP servers to query actual Sybase ASE and PostgreSQL database values for test cases',
+    'sybase',
+    'postgres',
+    'MCP Server Integration for Test Case Generation:
+
+1. Access to Database Connections:
+   - Use sybase-client-mcp to query source Sybase ASE database
+   - Use postgres-client-mcp to query target PostgreSQL database
+   - Retrieve actual data values to make test cases more realistic and relevant
+
+2. Test Data Strategy:
+   - For UPDATE/DELETE operations: Query existing records to use actual IDs/keys that exist in the database
+   - For SELECT operations: Use actual filter values that return real data
+   - For INSERT operations: Check existing data to avoid constraint violations
+
+3. Happy Path Test Cases:
+   - Query sample records from relevant tables to use as test inputs
+   - Ensure test values match actual data types and constraints
+   - Use real foreign key values that exist in parent tables
+
+4. Example Queries (Sybase):
+   - SELECT a few sample IDs: SELECT TOP 3 id FROM schema.table
+   - Get valid foreign keys: SELECT DISTINCT TOP 5 fk_column FROM schema.table WHERE fk_column IS NOT NULL
+   - Check data ranges: SELECT MIN(column), MAX(column) FROM schema.table
+
+5. Benefits:
+   - Tests are more realistic and meaningful
+   - Reduces false failures from non-existent test data
+   - Validates actual database state and constraints',
+    TRUE,
+    15,
+    NOW(),
+    NOW()
+)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO knowledge_base_categories (knowledge_base_id, category) 
+SELECT id, cat FROM knowledge_bases, (VALUES ('UNIT_TEST'), ('COMPARISON_TEST')) AS t(cat)
+WHERE name = 'Use MCP Servers for Realistic Test Data - Sybase to PostgreSQL'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO knowledge_bases (name, description, source_db_engine, target_db_engine, content, active, priority, created_at, updated_at)
+VALUES 
+(
+    'Procedure Testing with Transaction Rollback - Sybase to PostgreSQL',
+    'Test stored procedures by querying data before/after execution with rollback to preserve data integrity',
+    'sybase',
+    'postgres',
+    'Procedure Testing Strategy with Transaction Rollback:
+
+1. Test Pattern for Data-Modifying Procedures:
+   - Query relevant tables BEFORE procedure execution to capture initial state
+   - Execute the procedure being tested
+   - Query the same tables AFTER procedure execution to verify changes
+   - ROLLBACK transaction to restore original data state
+
+2. Sybase ASE Syntax for Testing:
+   a) Simple query-execute-query pattern:
+      BEGIN TRANSACTION
+      SELECT COUNT(*) as before_count FROM schema.table WHERE condition
+      EXEC schema.procedure_name @param1 = value1, @param2 = value2
+      SELECT COUNT(*) as after_count FROM schema.table WHERE condition
+      ROLLBACK TRANSACTION
+   
+   b) With variables:
+      BEGIN TRANSACTION
+      DECLARE @before_count INT, @after_count INT
+      SELECT @before_count = COUNT(*) FROM schema.table WHERE condition
+      EXEC schema.procedure_name @param1 = value1, @param2 = value2
+      SELECT @after_count = COUNT(*) FROM schema.table WHERE condition
+      SELECT @before_count as before_count, @after_count as after_count
+      ROLLBACK TRANSACTION
+   
+   c) CRITICAL: Sybase ASE syntax rules:
+      - Use EXEC or EXECUTE for procedure calls
+      - Use BEGIN TRANSACTION and ROLLBACK TRANSACTION
+      - Parameters use @param_name = value syntax
+      - Variables declared with DECLARE @var_name datatype
+      - Statements separated by newlines (GO for batch separator)
+
+3. PostgreSQL Syntax for Testing:
+   BEGIN;
+   SELECT COUNT(*) as before_count FROM schema.table WHERE condition;
+   CALL schema.procedure_name(param1, param2);
+   SELECT COUNT(*) as after_count FROM schema.table WHERE condition;
+   ROLLBACK;
+
+4. Implementation Steps:
+   a) Use MCP server to query initial data state
+   b) Execute the procedure with test parameters
+   c) Query data again to verify procedure effects
+   d) ROLLBACK to undo all changes
+
+5. Benefits:
+   - Validates procedure logic without data corruption
+   - Enables repeatable testing on production-like data
+   - Verifies actual database impact, not just return values
+   - Safe for testing in shared environments
+
+6. Test Case Structure:
+   - Test 1: Happy path with valid data
+   - Test 2: Edge cases (empty sets, boundary values)
+   - Test 3: Error handling (invalid parameters, constraint violations)
+   - Each test uses query/execute/query/ROLLBACK pattern',
+    TRUE,
+    20,
+    NOW(),
+    NOW()
+)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO knowledge_base_categories (knowledge_base_id, category) 
+SELECT id, cat FROM knowledge_bases, (VALUES ('UNIT_TEST'), ('COMPARISON_TEST')) AS t(cat)
+WHERE name = 'Procedure Testing with Transaction Rollback - Sybase to PostgreSQL'
+ON CONFLICT DO NOTHING;

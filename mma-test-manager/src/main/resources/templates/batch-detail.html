@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Batch Job Detail</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}"/>
+    <style>
+        .detail-container { max-width: 95%; margin: 0 auto; padding: 20px; }
+        .item-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .item-table th, .item-table td { padding: 6px 10px; border-bottom: 1px solid #f1f5f9; text-align: left; }
+        .item-table th { background: #f8fafc; font-weight: 600; }
+        .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .badge-success { background: #dcfce7; color: #166534; }
+        .badge-failed { background: #fee2e2; color: #991b1b; }
+        .badge-running { background: #dbeafe; color: #1d4ed8; }
+        .badge-pending { background: #f1f5f9; color: #475569; }
+        .badge-skipped { background: #fef3c7; color: #92400e; }
+        .summary { display: flex; gap: 20px; margin-bottom: 20px; padding: 15px; background: #f8fafc; border-radius: 6px; }
+        .summary-item { text-align: center; }
+        .summary-item .num { font-size: 24px; font-weight: 700; }
+        .summary-item .label { font-size: 11px; color: #64748b; }
+    </style>
+</head>
+<body>
+<div class="detail-container">
+    <div class="header">
+        <div class="header-content">
+            <h1>🗂️ MMA Test Manager</h1>
+            <div class="header-nav">
+                <a th:href="@{/project/{id}(id=${projectId})}" class="btn btn-secondary btn-sm">← Back to Project</a>
+                <a th:href="@{'/project/' + ${projectId} + '/batch'}" class="btn btn-secondary btn-sm">⚡ Batch Operations</a>
+                <form method="post" th:action="@{/logout}" style="display: inline;"><button type="submit" class="btn btn-secondary btn-sm">Logout</button></form>
+            </div>
+        </div>
+    </div>
+
+    <div style="margin-top:20px;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+        <h2 style="margin:0;">Batch #<span th:text="${job.id}"></span> — <span th:text="${job.operation}"></span></h2>
+        <span style="font-size:12px; color:#64748b;" th:text="'Submitted by ' + (${job.submittedBy} != null ? ${job.submittedBy} : '—') + ' at ' + ${#temporals.format(job.createdAt, 'yyyy-MM-dd HH:mm:ss')}"></span>
+    </div>
+
+    <div class="summary">
+        <div class="summary-item"><div class="num" th:text="${job.totalItems}"></div><div class="label">Total</div></div>
+        <div class="summary-item"><div class="num" style="color:#166534;" th:text="${job.completedItems}"></div><div class="label">Success</div></div>
+        <div class="summary-item"><div class="num" style="color:#991b1b;" th:text="${job.failedItems}"></div><div class="label">Failed</div></div>
+        <div class="summary-item"><div class="num" th:text="${job.totalItems - job.completedItems - job.failedItems}"></div><div class="label">Pending</div></div>
+        <div class="summary-item"><div class="label">Status</div><div class="num" style="font-size:14px;" th:text="${job.status}"></div></div>
+        <div class="summary-item"><div class="label">Priority</div><div class="num" style="font-size:14px;" th:text="${job.priority}"></div></div>
+    </div>
+
+    <table class="item-table">
+        <thead><tr><th>#</th><th>Object</th><th>Status</th><th>Message</th><th>Duration</th></tr></thead>
+        <tbody>
+            <tr th:each="item, idx : ${items}">
+                <td th:text="${idx.count}"></td>
+                <td style="font-family:monospace;" th:text="${item.objectName}"></td>
+                <td>
+                    <span class="badge" th:classappend="${item.status == 'SUCCESS' ? 'badge-success' : item.status == 'FAILED' ? 'badge-failed' : item.status == 'RUNNING' ? 'badge-running' : item.status == 'SKIPPED' ? 'badge-skipped' : 'badge-pending'}" th:text="${item.status}"></span>
+                </td>
+                <td style="font-size:11px; max-width:400px; overflow:hidden; text-overflow:ellipsis;" th:text="${item.message}"></td>
+                <td style="font-size:11px;" th:text="${item.startedAt != null && item.completedAt != null ? T(java.time.Duration).between(item.startedAt, item.completedAt).toSeconds() + 's' : '—'}"></td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+</body>
+</html>

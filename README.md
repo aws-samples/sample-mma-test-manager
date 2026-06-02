@@ -28,6 +28,7 @@ Model Context Protocol (MCP) servers that enable AI-assisted database operations
 1. **postgres-client-mcp** - PostgreSQL database operations
 2. **sqlserver-client-mcp** - SQL Server database operations  
 3. **oracle-client-mcp** - Oracle database operations
+3. **sybase-client-mcp** - Sybase ASE database operations
 
 All servers use the **stdio protocol** for stable communication with Kiro CLI.
 
