@@ -4,7 +4,7 @@ Spring Boot application for managing database migration testing with AI-powered 
 
 ## Features
 
-- **Multi-Engine Support**: Oracle, SQL Server → PostgreSQL
+- **Multi-Engine Support**: Oracle, SQL Server and Db2 LUW → PostgreSQL
 - **S3 Integration**: Load DMS Schema Conversion data into PostgreSQL repository
 - **Three Test Types**:
   - Comparison Test: Compare source vs target execution results
@@ -21,6 +21,7 @@ Spring Boot application for managing database migration testing with AI-powered 
 Refer to one of the following stacks in the repository for database setup:
  - one-click-deployment/oracle-to-postgres/mma-nested-stacks/database-stack.yaml
  - one-click-deployment/sqlserver-to-postgres/mma-nested-stacks/database-stack.yaml
+ - one-click-deployment/db2-to-postgres/mma-nested-stacks/database-stack.yaml
 
 ### 2. Configure Connections
 

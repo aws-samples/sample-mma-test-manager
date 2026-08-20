@@ -12,6 +12,7 @@ echo ""
 
 SERVERS=(
     "postgres-client-mcp"
+    "db2-luw-client-mcp"
     "sqlserver-client-mcp"
     "oracle-client-mcp"
     "mma-test-manager"

@@ -28,7 +28,8 @@ Model Context Protocol (MCP) servers that enable AI-assisted database operations
 1. **postgres-client-mcp** - PostgreSQL database operations
 2. **sqlserver-client-mcp** - SQL Server database operations  
 3. **oracle-client-mcp** - Oracle database operations
-3. **sybase-client-mcp** - Sybase ASE database operations
+4. **sybase-client-mcp** - Sybase ASE database operations
+5. **db2-luw-client-mcp** - IBM Db2 for Linux, UNIX and Windows (LUW) database operations
 
 All servers use the **stdio protocol** for stable communication with Kiro CLI.
 
@@ -49,6 +50,11 @@ One-click deployment solutions for different migration scenarios:
 - Main stack: `mma-apps-main-stack.yaml`
 - Nested stacks: `mma-nested-stacks/` (network, compute, database, demo-infrastructure, application-setup)
 - Deployment scripts: `deploy-mma-apps.sh`, `deploy-with-demo-infra.sh`, `deploy-with-demo-infra_cloudfront.sh`
+
+**one-click-deployment/db2-to-postgres/** ⚠️ *work in progress*
+- Main stack: `mma-apps-main-stack.yaml`
+- Nested stacks: `mma-nested-stacks/` (network, compute, database, demo-infrastructure, application-setup)
+- Deployment scripts: `deploy-with-demo-infra.sh`, `deploy-with-demo-infra_cloudfront.sh`, `deploy-with-demo-infra_cloudfront.sh`
 
 ## Quick Start
 
@@ -77,5 +83,6 @@ kiro-cli chat --agent mma-agent
 - Lab instructions from MMA Workshop
   - [Oracle to PostgreSQL](https://catalog.workshops.aws/mma-oracle-pg/en-US/6-modernization-validation/test-manager)
   - [SQL Server to PostgreSQL](https://catalog.workshops.aws/mma-mssql-pg/en-US/test-manager)
+  - [Db2 LUW to PostgreSQL](https://catalog.workshops.aws/mma-db2-pg/en-US/test-manager)
 - Individual server READMEs in each MCP directory
 
