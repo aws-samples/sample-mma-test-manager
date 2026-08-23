@@ -1,0 +1,436 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  MMA Test Manager - Minimal Deployment (Oracle to PostgreSQL).
+  Deploys a private-subnet EC2 host running VS Code (code-server) and the MMA
+  Test Manager for customers who ALREADY have a VPC, subnet, Test Manager repo
+  database, source Oracle database, target PostgreSQL database, and a DMS Schema
+  Conversion project. No CloudFront and no demo/sample infrastructure; a
+  single-port nginx TLS reverse proxy (443) fronts both apps.
+  Access is via AWS Systems Manager (SSM) port forwarding.
+
+###############################################################################
+# Parameter grouping / labels
+###############################################################################
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network (existing resources)
+        Parameters:
+          - VpcId
+          - Ec2SubnetId
+      - Label:
+          default: Access Configuration
+        Parameters:
+          - AdminPassword
+          - VSCodeUser
+          - AllowedClientCidr
+      - Label:
+          default: EC2 Instance Configuration
+        Parameters:
+          - InstanceType
+          - InstanceVolumeSize
+          - KeyPairName
+      - Label:
+          default: Application Source
+        Parameters:
+          - CodeRepoUrl
+          - CodeRepoBranch
+          - StackPrefix
+          - TemplateS3Bucket
+          - TemplateS3Prefix
+      - Label:
+          default: Customer-provided Databases and Secrets
+        Parameters:
+          - RepoDBSecretArn
+          - SourceOracleSecretArn
+          - TargetPostgresSecretArn
+          - SecretsKmsKeyArn
+          - S3DMSProjectPath
+          - S3DMSProjectBucket
+    ParameterLabels:
+      VpcId:
+        default: VPC ID
+      Ec2SubnetId:
+        default: EC2 Private Subnet
+      AdminPassword:
+        default: Admin Password (VS Code + Test Manager)
+      VSCodeUser:
+        default: OS / VS Code Username
+      AllowedClientCidr:
+        default: Allowed In-VPC Client CIDR (optional)
+      InstanceType:
+        default: Instance Type
+      InstanceVolumeSize:
+        default: Root Volume Size (GB)
+      KeyPairName:
+        default: EC2 Key Pair (optional)
+      CodeRepoUrl:
+        default: Git Repository URL
+      CodeRepoBranch:
+        default: Git Branch
+      StackPrefix:
+        default: Resource Name Prefix
+      TemplateS3Bucket:
+        default: Nested Templates S3 Bucket
+      TemplateS3Prefix:
+        default: Nested Templates S3 Prefix
+      RepoDBSecretArn:
+        default: Test Manager Repo DB Secret ARN
+      SourceOracleSecretArn:
+        default: Source Oracle Secret ARN
+      TargetPostgresSecretArn:
+        default: Target PostgreSQL Secret ARN
+      SecretsKmsKeyArn:
+        default: Secrets KMS CMK ARN (optional)
+      S3DMSProjectPath:
+        default: DMS Schema Conversion S3 Path
+      S3DMSProjectBucket:
+        default: DMS Schema Conversion S3 Bucket
+
+###############################################################################
+# Parameters - everything here is EXPECTED TO ALREADY EXIST in the account.
+###############################################################################
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC where the EC2 host will run.
+
+  Ec2SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      Existing PRIVATE subnet for the EC2 host. Must have outbound internet
+      access (NAT gateway) so setup scripts can install software and clone the
+      Git repo. No public IP is assigned.
+
+  AdminPassword:
+    Type: String
+    Description: >-
+      Password for the VS Code (code-server) login and the Test Manager 'admin'
+      user. Min 8 chars incl. uppercase, lowercase, digit, and special char.
+      Avoid $, #, {, } which can conflict with shell processing.
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z\d]).+$'
+    ConstraintDescription: >-
+      Must be at least 8 characters and include uppercase, lowercase, digit,
+      and special character. Avoid $, #, {, }.
+
+  VSCodeUser:
+    Type: String
+    Description: OS user that owns the workspace and runs the applications.
+    Default: awsmma
+    AllowedPattern: '^[a-z_][a-z0-9_-]{0,31}$'
+
+  InstanceType:
+    Type: String
+    Default: t3.large
+
+  InstanceVolumeSize:
+    Type: Number
+    Default: 50
+    MinValue: 30
+
+  KeyPairName:
+    Type: String
+    Description: Optional EC2 key pair. Leave blank to rely solely on SSM.
+    Default: ''
+
+  AllowedClientCidr:
+    Type: String
+    Description: >-
+      OPTIONAL. If set, opens inbound HTTPS (443) to the EC2 host from this CIDR
+      for in-VPC clients (bastion/VPN/Direct Connect). Leave blank (default) to
+      keep the host with NO inbound rules and reach it only via SSM port
+      forwarding. Do NOT set this to 0.0.0.0/0 on a public subnet.
+    Default: ''
+    AllowedPattern: '^$|^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$'
+
+  CodeRepoUrl:
+    Type: String
+    Description: HTTPS Git URL cloned into /workshop/MMA-Samples.
+    Default: 'https://github.com/aws-samples/sample-mma-test-manager.git'
+
+  CodeRepoBranch:
+    Type: String
+    Description: Git branch to check out.
+    Default: main
+
+  StackPrefix:
+    Type: String
+    Default: mma-min
+    AllowedPattern: '^[a-z0-9-]{3,20}$'
+
+  TemplateS3Bucket:
+    Type: String
+    Description: S3 bucket containing the nested stack templates.
+
+  TemplateS3Prefix:
+    Type: String
+    Description: S3 key prefix for the nested stack templates.
+    Default: mma-nested-stacks/
+
+  RepoDBSecretArn:
+    Type: String
+    Description: >-
+      Secrets Manager ARN for the Test Manager repository (metadata) PostgreSQL
+      database. Secret JSON must contain host, port, dbname, username, password.
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:secretsmanager:.*$'
+
+  SourceOracleSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for the source Oracle database credentials.
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:secretsmanager:.*$'
+
+  TargetPostgresSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for the target PostgreSQL database credentials.
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:secretsmanager:.*$'
+
+  SecretsKmsKeyArn:
+    Type: String
+    Description: >-
+      OPTIONAL. KMS customer managed key (CMK) ARN used to encrypt the secrets
+      above. Leave blank if the secrets use the AWS managed key
+      (aws/secretsmanager). If provided, the EC2 role is granted kms:Decrypt on
+      this key and the key policy must also allow this account/role (see
+      PREREQUISITES.md).
+    Default: ''
+
+  S3DMSProjectPath:
+    Type: String
+    Description: >-
+      Full S3 path to the DMS Schema Conversion project output, e.g.
+      s3://my-dms-bucket/my-project. Consumed by the Test Manager.
+    AllowedPattern: '^s3://.+$'
+
+  S3DMSProjectBucket:
+    Type: String
+    Description: >-
+      Bucket name portion of the DMS Schema Conversion S3 path (used to scope
+      the EC2 read permissions), e.g. my-dms-bucket.
+
+###############################################################################
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+  HasCmk: !Not [!Equals [!Ref SecretsKmsKeyArn, '']]
+  HasClientCidr: !Not [!Equals [!Ref AllowedClientCidr, '']]
+
+###############################################################################
+Resources:
+
+  ###########################################################################
+  # IAM - least privilege for the EC2 host
+  ###########################################################################
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: SecretsRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref RepoDBSecretArn
+                  - !Ref SourceOracleSecretArn
+                  - !Ref TargetPostgresSecretArn
+        - PolicyName: DmsProjectS3Read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${S3DMSProjectBucket}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${S3DMSProjectBucket}/*'
+
+  # Grant kms:Decrypt only when the customer supplies a CMK for their secrets.
+  EC2KmsPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasCmk
+    Properties:
+      PolicyName: !Sub '${StackPrefix}-secrets-kms-decrypt'
+      Roles: [!Ref EC2Role]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: !Ref SecretsKmsKeyArn
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref EC2Role]
+
+  ###########################################################################
+  # Security group - no inbound (access is via SSM). Default egress allows all.
+  ###########################################################################
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F1000
+            reason: "All outbound traffic is required for package installs, Git clone, and reaching the customer databases; access is inbound-only via SSM so no ingress rules are defined."
+    Properties:
+      GroupDescription: !Sub 'MMA Test Manager (minimal) EC2 - SSM access; optional 443 from AllowedClientCidr'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        !If
+          - HasClientCidr
+          - - Description: HTTPS from allowed in-VPC clients
+              IpProtocol: tcp
+              FromPort: 443
+              ToPort: 443
+              CidrIp: !Ref AllowedClientCidr
+          - !Ref AWS::NoValue
+      SecurityGroupEgress:
+        - Description: Allow all outbound
+          IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-mma-apps-sg'
+
+  ###########################################################################
+  # Nested stacks
+  ###########################################################################
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}compute-stack.yaml'
+      Parameters:
+        SubnetId: !Ref Ec2SubnetId
+        SecurityGroupId: !Ref InstanceSecurityGroup
+        InstanceType: !Ref InstanceType
+        VolumeSize: !Ref InstanceVolumeSize
+        KeyPairName: !Ref KeyPairName
+        StackPrefix: !Ref StackPrefix
+        IAMInstanceProfile: !Ref EC2InstanceProfile
+      TimeoutInMinutes: 15
+
+  ApplicationSetupStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [ComputeStack]
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}application-setup.yaml'
+      Parameters:
+        StackPrefix: !Ref StackPrefix
+      TimeoutInMinutes: 10
+
+  SSMWaiterStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}ssm-waiter-stack.yaml'
+      Parameters:
+        StackPrefix: !Ref StackPrefix
+      TimeoutInMinutes: 5
+
+  ###########################################################################
+  # Ordered setup steps (each runs an SSM document synchronously via the waiter)
+  ###########################################################################
+  RunEC2BaseSetup:
+    Type: Custom::SSMWaiter
+    DependsOn: [ComputeStack, SSMWaiterStack]
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ComputeStack.Outputs.SetupEC2BaseDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        AdminPassword: [!Ref AdminPassword]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 900
+
+  RunApplicationDeployment:
+    Type: Custom::SSMWaiter
+    DependsOn: [RunEC2BaseSetup]
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ApplicationSetupStack.Outputs.ApplicationDeploymentDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        CodeRepoUrl: [!Ref CodeRepoUrl]
+        CodeRepoBranch: [!Ref CodeRepoBranch]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 900
+
+  RunConfigureSecrets:
+    Type: Custom::SSMWaiter
+    DependsOn: [RunApplicationDeployment]
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ApplicationSetupStack.Outputs.ConfigureSecretsDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        RepoDBSecretArn: [!Ref RepoDBSecretArn]
+        SourceOracleSecretArn: [!Ref SourceOracleSecretArn]
+        TargetPostgresSecretArn: [!Ref TargetPostgresSecretArn]
+        S3DMSProjectPath: [!Ref S3DMSProjectPath]
+        AdminPassword: [!Ref AdminPassword]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 300
+
+  RunApplicationPostDeployment:
+    Type: Custom::SSMWaiter
+    DependsOn: [RunConfigureSecrets]
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ApplicationSetupStack.Outputs.ApplicationPostDeploymentDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 300
+
+###############################################################################
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID (target for SSM sessions).
+    Value: !GetAtt ComputeStack.Outputs.InstanceId
+
+  PrivateIp:
+    Description: Private IP address of the EC2 host.
+    Value: !GetAtt ComputeStack.Outputs.PrivateIp
+
+  StartTunnelCommand:
+    Description: >-
+      Run locally to reach the host over a single HTTPS port via SSM. Then open
+      the two URLs below. Uses local port 8443 -> host 443.
+    Value: !Sub >-
+      aws ssm start-session --region ${AWS::Region} --target ${ComputeStack.Outputs.InstanceId}
+      --document-name AWS-StartPortForwardingSession
+      --parameters '{"portNumber":["443"],"localPortNumber":["8443"]}'
+
+  TestManagerURL:
+    Description: MMA Test Manager (after tunnel). Login admin / your AdminPassword. Self-signed cert - accept the browser warning.
+    Value: 'https://localhost:8443/testmgr/'
+
+  CodeServerURL:
+    Description: VS Code (after tunnel). Login with your AdminPassword.
+    Value: 'https://localhost:8443/?folder=/workshop/MMA-Samples'
+
+  InVpcTestManagerURL:
+    Condition: HasClientCidr
+    Description: Test Manager URL for in-VPC clients (when AllowedClientCidr is set).
+    Value: !Sub 'https://${ComputeStack.Outputs.PrivateIp}/testmgr/'
+
+  InVpcCodeServerURL:
+    Condition: HasClientCidr
+    Description: VS Code URL for in-VPC clients (when AllowedClientCidr is set).
+    Value: !Sub 'https://${ComputeStack.Outputs.PrivateIp}/?folder=/workshop/MMA-Samples'

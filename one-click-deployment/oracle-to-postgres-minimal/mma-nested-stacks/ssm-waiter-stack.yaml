@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda-backed custom resource that runs an SSM command document and waits for completion
+
+Parameters:
+  StackPrefix:
+    Type: String
+
+Resources:
+  SSMWaiterRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "SSM GetCommandInvocation and ListCommandInvocations do not support resource-level permissions."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: '*'
+
+  SSMWaiterFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "Custom resource only calls the SSM API; VPC access is not required."
+          - id: W92
+            reason: "Low invocation frequency custom resource; reserved concurrency not required."
+      checkov:
+        skip:
+          - id: CKV_AWS_116
+            comment: "DLQ not required for a CloudFormation custom resource."
+          - id: CKV_AWS_117
+            comment: "Lambda only calls AWS APIs; no VPC access required."
+    Properties:
+      FunctionName: !Sub '${StackPrefix}-ssm-waiter'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt SSMWaiterRole.Arn
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+          from datetime import datetime
+          from botocore.exceptions import ClientError
+
+          ssm = boto3.client('ssm')
+
+          def handler(event, context):
+              start_time = datetime.utcnow()
+              try:
+                  request_type = event['RequestType']
+
+                  if request_type == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  if request_type in ['Create', 'Update']:
+                      props = event['ResourceProperties']
+                      document_name = props['DocumentName']
+                      instance_id = props['InstanceId']
+                      parameters = props.get('Parameters', {})
+                      timeout = int(props.get('Timeout', 600))
+
+                      print(f"Document: {document_name} InstanceId: {instance_id} Timeout: {timeout}s")
+
+                      command_id = None
+                      for attempt in range(5):
+                          try:
+                              response = ssm.send_command(
+                                  InstanceIds=[instance_id],
+                                  DocumentName=document_name,
+                                  Parameters=parameters,
+                                  TimeoutSeconds=timeout
+                              )
+                              command_id = response['Command']['CommandId']
+                              print(f"SSM command sent: {command_id}")
+                              break
+                          except ClientError as e:
+                              if e.response['Error']['Code'] == 'InvalidInstanceId' and attempt < 4:
+                                  print(f"InvalidInstanceId on attempt {attempt + 1}, retrying in 60s")
+                                  time.sleep(60)
+                              else:
+                                  raise
+
+                      poll_start = time.time()
+                      while time.time() - poll_start < timeout:
+                          try:
+                              invocation = ssm.get_command_invocation(
+                                  CommandId=command_id,
+                                  InstanceId=instance_id
+                              )
+                              status = invocation['Status']
+
+                              if status == 'Success':
+                                  duration = (datetime.utcnow() - start_time).total_seconds()
+                                  print(f"SUCCESS in {duration:.2f}s")
+                                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                                      'CommandId': command_id,
+                                      'Status': status
+                                  })
+                                  return
+                              elif status in ['Failed', 'Cancelled', 'TimedOut']:
+                                  error_msg = invocation.get('StandardErrorContent', 'Command failed')
+                                  print(f"{status}: {error_msg}")
+                                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                                      'CommandId': command_id,
+                                      'Status': status,
+                                      'Error': error_msg
+                                  })
+                                  return
+
+                              time.sleep(10)
+                          except ssm.exceptions.InvocationDoesNotExist:
+                              time.sleep(5)
+
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {
+                          'CommandId': command_id,
+                          'Error': 'Timeout waiting for command completion'
+                      })
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Error': str(e)
+                  })
+
+Outputs:
+  SSMWaiterFunctionArn:
+    Value: !GetAtt SSMWaiterFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SSMWaiterFunctionArn'

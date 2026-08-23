@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  EC2 host for the MMA Test Manager (minimal). Amazon Linux 2023, private
+  subnet, no public IP. Includes the base setup SSM document that installs
+  code-server, nginx, Java 21, Maven, Git, the Oracle and PostgreSQL clients,
+  and the Kiro CLI.
+
+Parameters:
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet (no public IP is assigned).
+
+  SecurityGroupId:
+    Type: String
+
+  InstanceType:
+    Type: String
+    Default: t3.large
+
+  VolumeSize:
+    Type: Number
+    Default: 50
+
+  KeyPairName:
+    Type: String
+    Default: ''
+
+  StackPrefix:
+    Type: String
+
+  IAMInstanceProfile:
+    Type: String
+    Description: IAM instance profile name.
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+
+Resources:
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "Detailed monitoring not required for this single-user tooling host."
+    Properties:
+      # Amazon Linux 2023, x86_64. This deployment is AL2023-only by design.
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref AWS::NoValue]
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref SecurityGroupId
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -y
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-mma-apps-server'
+
+  SetupEC2BaseDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-setup-ec2-software'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Install base software (code-server, Java, Maven, DB clients, Kiro CLI)
+        parameters:
+          AdminPassword:
+            type: String
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          - name: AddVSCodeUser
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub |
+                  echo 'Adding user: {{ VSCodeUser }}'
+                  adduser -c '' {{ VSCodeUser }} || true
+                  passwd -l {{ VSCodeUser }} || true
+                  echo "{{ VSCodeUser }}:{{ AdminPassword }}" | chpasswd
+                  usermod -aG wheel {{ VSCodeUser }}
+                - !Sub |
+                  tee /etc/sudoers.d/91-vscode-user <<EOF
+                  {{ VSCodeUser }} ALL=(ALL) NOPASSWD:ALL
+                  EOF
+                - !Sub mkdir -p /home/{{ VSCodeUser }}/.local/bin && chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /home/{{ VSCodeUser }}
+                - !Sub getent passwd {{ VSCodeUser }}
+          - name: UpdateProfile
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                - echo LANG=en_US.utf-8 >> /etc/environment
+                - echo LC_ALL=en_US.UTF-8 >> /etc/environment
+                - !Sub echo 'PATH=$PATH:/home/{{ VSCodeUser }}/.local/bin' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo 'export PATH' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo 'export AWS_REGION=${AWS::Region}' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo 'export AWS_ACCOUNTID=${AWS::AccountId}' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo 'export NEXT_TELEMETRY_DISABLED=1' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo "export PS1='\[\033[01;32m\]\u:\[\033[01;34m\]\w\[\033[00m\]\$ '" >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /home/{{ VSCodeUser }}
+          - name: InstallBasePackages
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - '#!/bin/bash'
+                - |
+                  echo "Installing java-21, git, maven, nginx, and helper tools"
+                  dnf install -y java-21-amazon-corretto-devel java-21-amazon-corretto git maven-amazon-corretto21 wget zip unzip curl-minimal gnupg whois argon2 openssl jq nginx
+          - name: InstallAWSCLI
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                - mkdir -p /tmp
+                - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip -o /tmp/aws-cli.zip
+                - unzip -q -o -d /tmp /tmp/aws-cli.zip
+                - /tmp/aws/install --update
+                - rm -rf /tmp/aws /tmp/aws-cli.zip
+                - aws --version
+          - name: ConfigureCodeServer
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 600
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub export HOME=/home/{{ VSCodeUser }}
+                - curl -fsSL https://code-server.dev/install.sh | bash -s -- 2>&1
+                - !Sub systemctl enable --now code-server@{{ VSCodeUser }} 2>&1
+                - !Sub mkdir -p /home/{{ VSCodeUser }}/.config/code-server
+                - !Sub |
+                  tee /home/{{ VSCodeUser }}/.config/code-server/config.yaml <<EOF
+                  bind-addr: 127.0.0.1:8080
+                  cert: false
+                  auth: password
+                  hashed-password: "$(echo -n {{ AdminPassword }} | argon2 $(openssl rand -base64 12) -e)"
+                  EOF
+                - !Sub mkdir -p /home/{{ VSCodeUser }}/.local/share/code-server/User/
+                - !Sub touch /home/{{ VSCodeUser }}/.hushlogin
+                - !Sub mkdir -p /workshop && chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /workshop
+                - !Sub |
+                  tee /home/{{ VSCodeUser }}/.local/share/code-server/User/settings.json <<EOF
+                  {
+                    "extensions.autoUpdate": false,
+                    "extensions.autoCheckUpdates": false,
+                    "telemetry.telemetryLevel": "off",
+                    "security.workspace.trust.startupPrompt": "never",
+                    "security.workspace.trust.enabled": false,
+                    "security.workspace.trust.banner": "never",
+                    "security.workspace.trust.emptyWindow": false,
+                    "workbench.secondarySideBar.defaultVisibility": "hidden",
+                    "chat.disableAIFeatures": true,
+                    "auto-run-command.rules": [
+                      {
+                        "command": "workbench.action.terminal.new"
+                      }
+                    ]
+                  }
+                  EOF
+                - !Sub chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /home/{{ VSCodeUser }}
+                - !Sub systemctl restart code-server@{{ VSCodeUser }}
+                - !Sub sudo -u {{ VSCodeUser }} --login code-server --install-extension AmazonWebServices.aws-toolkit-vscode --force || true
+                - !Sub sudo -u {{ VSCodeUser }} --login code-server --install-extension synedra.auto-run-command --force || true
+                - !Sub chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /home/{{ VSCodeUser }}
+                - code-server -v
+                - !Sub systemctl status code-server@{{ VSCodeUser }} --no-pager || true
+          - name: InstallDatabaseClients
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub |
+                  echo "Installing Oracle SQLcl..."
+                  su - {{ VSCodeUser }} <<EOD1S
+                  wget -q https://download.oracle.com/otn_software/java/sqldeveloper/sqlcl-latest.zip
+                  unzip -q -o sqlcl-latest.zip
+                  rm -f sqlcl-latest.zip
+                  echo 'export SQLCL_HOME=/home/{{ VSCodeUser }}/sqlcl' >> ~/.bash_profile
+                  echo 'export PATH=\$SQLCL_HOME/bin:\$PATH' >> ~/.bash_profile
+                  EOD1S
+                  echo "SQLcl version: $(/home/{{ VSCodeUser }}/sqlcl/bin/sql -version || true)"
+
+                  echo "Installing Oracle Instant Client (SQL*Plus)..."
+                  dnf install -y https://download.oracle.com/otn_software/linux/instantclient/1929000/oracle-instantclient19.29-basic-19.29.0.0.0-1.x86_64.rpm \
+                  https://download.oracle.com/otn_software/linux/instantclient/1929000/oracle-instantclient19.29-sqlplus-19.29.0.0.0-1.x86_64.rpm \
+                  https://download.oracle.com/otn_software/linux/instantclient/1929000/oracle-instantclient19.29-tools-19.29.0.0.0-1.x86_64.rpm
+                  su - {{ VSCodeUser }} <<EOD2S
+                  echo 'export ORACLE_HOME=/usr/lib/oracle/19.29/client64' >> ~/.bash_profile
+                  echo 'export PATH=\$ORACLE_HOME/bin:\$PATH' >> ~/.bash_profile
+                  EOD2S
+                  echo "SQL*Plus version: $(/usr/lib/oracle/19.29/client64/bin/sqlplus -V || true)"
+
+                  echo "Installing PostgreSQL client..."
+                  dnf install -y postgresql17-contrib postgresql17
+                  echo "psql version: $(psql -V || true)"
+          - name: InstallKiroCLI
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - !Sub |
+                  su - {{ VSCodeUser }} <<'EOFKIRO'
+                  curl -fsSL https://cli.kiro.dev/install | bash
+                  export PATH="$HOME/.local/bin:$PATH"
+                  echo "Kiro CLI version: $(kiro-cli -V || true)"
+                  EOFKIRO
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+
+  PrivateIp:
+    Description: Private IP address
+    Value: !GetAtt EC2Instance.PrivateIp
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateIp'
+
+  SetupEC2BaseDocumentName:
+    Description: SSM document name for base setup
+    Value: !Ref SetupEC2BaseDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-SetupEC2BaseDocumentName'

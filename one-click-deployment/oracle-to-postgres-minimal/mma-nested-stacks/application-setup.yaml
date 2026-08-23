@@ -1,0 +1,310 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Application setup SSM documents for the MMA Test Manager (minimal). Clones the
+  Git repository into /workshop/MMA-Samples, builds it, wires the Test Manager
+  and MCP servers to customer-provided secrets, runs the app as a systemd
+  service, and fronts both apps with an nginx TLS reverse proxy on 443
+  (/ -> code-server, /testmgr/ -> Test Manager).
+
+Parameters:
+  StackPrefix:
+    Type: String
+
+Resources:
+
+  ###########################################################################
+  # 1) Clone + build
+  ###########################################################################
+  ApplicationDeploymentDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-application-deploy'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Clone the MMA Test Manager repository into /workshop/MMA-Samples and build it
+        parameters:
+          CodeRepoUrl:
+            type: String
+          CodeRepoBranch:
+            type: String
+            default: 'main'
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          - name: CloneRepository
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - '#!/bin/bash'
+                - set -e
+                - mkdir -p /workshop
+                - rm -rf /workshop/MMA-Samples
+                - git clone --depth 1 --branch "{{ CodeRepoBranch }}" "{{ CodeRepoUrl }}" /workshop/MMA-Samples
+                - !Sub ln -sfn /workshop/MMA-Samples /home/{{ VSCodeUser }}/workspace
+                - !Sub chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /workshop
+                - mkdir -p /var/log/mma-apps
+                - !Sub chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /var/log/mma-apps
+          - name: BuildApplications
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - |
+                  su - {{ VSCodeUser }} <<'EOFBUILD'
+                  export PATH=/usr/share/maven/bin:/usr/bin:/usr/local/bin:$PATH
+                  cd /workshop/MMA-Samples
+                  chmod +x build-all.sh
+                  ./build-all.sh > /var/log/mma-apps/build.log 2>&1
+                  echo "Build completed at $(date)" >> /var/log/mma-apps/build.log
+                  echo "Last 15 lines of build.log:"
+                  tail -n 15 /var/log/mma-apps/build.log
+                  EOFBUILD
+                - echo 'export PATH=/usr/share/maven/bin:$PATH' >> /home/{{ VSCodeUser }}/.bashrc
+
+  ###########################################################################
+  # 2) Configure secrets (customer-provided) + Kiro agent
+  ###########################################################################
+  ConfigureSecretsDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-configure-secrets'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Point the Test Manager and MCP servers at customer-provided secrets
+        parameters:
+          RepoDBSecretArn:
+            type: String
+          SourceOracleSecretArn:
+            type: String
+          TargetPostgresSecretArn:
+            type: String
+          S3DMSProjectPath:
+            type: String
+          AdminPassword:
+            type: String
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          - name: ConfigureMcpServers
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - |
+                  su - {{ VSCodeUser }} <<'EOFMCP'
+                  set -e
+                  cd /workshop/MMA-Samples
+
+                  # Oracle MCP -> source Oracle secret
+                  sed -i.bak "s|mcp.db.connection.detail=.*|mcp.db.connection.detail={{ SourceOracleSecretArn }}|g" \
+                    oracle-client-mcp/application-secretsmanager.properties
+
+                  # PostgreSQL MCP -> target PostgreSQL secret
+                  sed -i.bak "s|mcp.db.connection.detail=.*|mcp.db.connection.detail={{ TargetPostgresSecretArn }}|g" \
+                    postgres-client-mcp/application-secretsmanager.properties
+                  sed -i.bak "s|mcp.db.connection.readonly=.*|mcp.db.connection.readonly=false|g" \
+                    postgres-client-mcp/application-secretsmanager.properties
+
+                  # Kiro agent config already references /workshop/MMA-Samples paths - copy as-is.
+                  mkdir -p ~/.kiro/agents/
+                  cp ./docs/sample-oracle-postgres-mma-agent-for-kiro-cli.json ~/.kiro/agents/mma-agent.json
+                  echo "MCP servers and Kiro agent configured"
+                  EOFMCP
+          - name: ConfigureTestManager
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - |
+                  cat > /workshop/MMA-Samples/mma-test-manager/application-secretsmanager.properties <<EOFTM
+                  spring.application.name=mma-test-manager
+                  spring.jpa.hibernate.ddl-auto=update
+                  spring.flyway.enabled=true
+                  spring.flyway.baseline-on-migrate=true
+                  spring.devtools.restart.enabled=false
+                  spring.devtools.livereload.enabled=false
+                  server.port=8082
+                  server.servlet.context-path=/testmgr
+                  server.forward-headers-strategy=framework
+                  server.shutdown=graceful
+                  spring.lifecycle.timeout-per-shutdown-phase=20s
+
+                  mma.security.username=admin
+                  mma.security.password={{ AdminPassword }}
+
+                  mma.repo.type=secretsmanager
+                  mma.repo.secret={{ RepoDBSecretArn }}
+
+                  mma.s3.default-path={{ S3DMSProjectPath }}
+                  mma.kiro.command=/home/{{ VSCodeUser }}/.local/bin/kiro-cli chat --agent mma-agent --no-interactive
+                  mma.kiro.max-retries=10
+
+                  mma.sourcedb.connection.type=secretsmanager
+                  mma.sourcedb.connection.secret={{ SourceOracleSecretArn }}
+
+                  mma.targetdb.connection.type=secretsmanager
+                  mma.targetdb.connection.secret={{ TargetPostgresSecretArn }}
+
+                  mma.sourcedb.test.type=secretsmanager
+                  mma.sourcedb.test.secret={{ SourceOracleSecretArn }}
+
+                  mma.targetdb.test.type=secretsmanager
+                  mma.targetdb.test.secret={{ TargetPostgresSecretArn }}
+                  EOFTM
+                - chown {{ VSCodeUser }}:{{ VSCodeUser }} /workshop/MMA-Samples/mma-test-manager/application-secretsmanager.properties
+                - echo "Test Manager configuration written"
+
+  ###########################################################################
+  # 3) Start the application (systemd)
+  ###########################################################################
+  ApplicationPostDeploymentDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-application-post-deploy'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Register and start the MMA Test Manager systemd service
+        parameters:
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          - name: StartApplication
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - |
+                  cat > /etc/systemd/system/mma-test-manager.service <<'EOF'
+                  [Unit]
+                  Description=MMA Test Manager
+                  After=network.target
+
+                  [Service]
+                  Type=simple
+                  User={{ VSCodeUser }}
+                  WorkingDirectory=/workshop/MMA-Samples/mma-test-manager
+                  ExecStart=/usr/bin/java -jar target/mma-test-manager.jar --spring.config.location=application-secretsmanager.properties
+                  Restart=on-failure
+                  RestartSec=10
+                  StandardOutput=append:/var/log/mma-apps/mma-test-manager.log
+                  StandardError=append:/var/log/mma-apps/mma-test-manager-error.log
+
+                  [Install]
+                  WantedBy=multi-user.target
+                  EOF
+                - mkdir -p /var/log/mma-apps
+                - chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /var/log/mma-apps
+                - systemctl daemon-reload
+                - systemctl enable mma-test-manager
+                - systemctl restart mma-test-manager
+                - sleep 5
+                - systemctl status mma-test-manager --no-pager || true
+                - echo "Application started at $(date)" >> /var/log/mma-apps/startup.log
+          - name: ConfigureNginx
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - '#!/bin/bash'
+                - set -e
+                - mkdir -p /etc/nginx/ssl
+                - |
+                  # Self-signed certificate. This encrypts traffic in transit but
+                  # does NOT authenticate the server (no protection against an
+                  # active man-in-the-middle). Replace with a CA-issued/ACM-fronted
+                  # certificate for production. See ACCESS-AND-TROUBLESHOOTING.md.
+                  if [ ! -f /etc/nginx/ssl/nginx-selfsigned.crt ]; then
+                    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
+                      -keyout /etc/nginx/ssl/nginx-selfsigned.key \
+                      -out /etc/nginx/ssl/nginx-selfsigned.crt \
+                      -subj "/C=US/ST=NA/L=NA/O=MMA/CN=mma-test-manager"
+                  fi
+                - |
+                  # Maps used by the reverse proxy:
+                  #  - $connection_upgrade: correct 'Connection' header for WebSockets.
+                  #  - $fwd_port: the client-facing port taken from the Host header
+                  #    (e.g. 8443 over an SSM tunnel), sent as X-Forwarded-Port so the
+                  #    app builds redirect URLs on the right port.
+                  cat > /etc/nginx/conf.d/00-websocket-upgrade.conf <<'EOF'
+                  map $http_upgrade $connection_upgrade {
+                      default upgrade;
+                      ''      close;
+                  }
+                  map $http_host $fwd_port {
+                      default        443;
+                      "~:(?<p>\d+)$" $p;
+                  }
+                  EOF
+                - |
+                  # Single entry point on 443, following the vscode-server-vpc-v2
+                  # pattern: '/' -> VS Code (code-server, 8080), '/testmgr/' ->
+                  # Test Manager (8082, app context-path=/testmgr). Serving
+                  # code-server at the ROOT path is required for its workbench
+                  # WebSocket to work; a subpath breaks it (close code 1006).
+                  cat > /etc/nginx/conf.d/mma-apps.conf <<'EOF'
+                  server {
+                      listen 80;
+                      listen [::]:80;
+                      return 301 https://$host$request_uri;
+                  }
+
+                  server {
+                      listen 443 ssl;
+                      listen [::]:443 ssl;
+                      ssl_certificate     /etc/nginx/ssl/nginx-selfsigned.crt;
+                      ssl_certificate_key /etc/nginx/ssl/nginx-selfsigned.key;
+                      ssl_protocols TLSv1.2 TLSv1.3;
+
+                      # MMA Test Manager under /testmgr/ (app context-path=/testmgr)
+                      location /testmgr/ {
+                          proxy_pass http://127.0.0.1:8082/testmgr/;
+                          proxy_http_version 1.1;
+                          proxy_set_header Host $http_host;
+                          proxy_set_header X-Real-IP $remote_addr;
+                          proxy_set_header X-Forwarded-Proto https;
+                          proxy_set_header X-Forwarded-Host $http_host;
+                          proxy_set_header X-Forwarded-Port $fwd_port;
+                          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                          proxy_set_header Upgrade $http_upgrade;
+                          proxy_set_header Connection $connection_upgrade;
+                      }
+
+                      # VS Code (code-server) at the root path - needs WebSocket upgrade.
+                      # Forward the full Host header incl. port ($http_host, not $host)
+                      # so code-server's WebSocket origin/host check passes when
+                      # reached on a non-standard port (e.g. SSM tunnel local 8443).
+                      location / {
+                          proxy_pass http://127.0.0.1:8080/;
+                          proxy_http_version 1.1;
+                          proxy_set_header Host $http_host;
+                          proxy_set_header X-Forwarded-Proto https;
+                          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                          proxy_set_header Upgrade $http_upgrade;
+                          proxy_set_header Connection $connection_upgrade;
+                          proxy_set_header Accept-Encoding gzip;
+                          proxy_read_timeout 3600s;
+                          proxy_send_timeout 3600s;
+                      }
+                  }
+                  EOF
+                - nginx -t
+                - systemctl enable nginx
+                - systemctl restart nginx
+                - echo "Nginx reverse proxy configured on 443 at $(date)" >> /var/log/mma-apps/startup.log
+
+Outputs:
+  ApplicationDeploymentDocumentName:
+    Value: !Ref ApplicationDeploymentDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationDeploymentSSMDoc'
+
+  ConfigureSecretsDocumentName:
+    Value: !Ref ConfigureSecretsDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-ConfigureSecretsSSMDoc'
+
+  ApplicationPostDeploymentDocumentName:
+    Value: !Ref ApplicationPostDeploymentDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationPostDeploymentSSMDoc'
