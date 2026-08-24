@@ -20,15 +20,18 @@ public class DatabaseConnectionService {
     private final OracleCommonService oracleCommonService;
     private final SQLServerCommonService sqlServerCommonService;
     private final SybaseCommonService sybaseCommonService;
+    private final Db2CommonService db2CommonService;
     
     public DatabaseConnectionService(PostgresCommonService postgresCommonService,
                                     OracleCommonService oracleCommonService,
                                     SQLServerCommonService sqlServerCommonService,
-                                    SybaseCommonService sybaseCommonService) {
+                                    SybaseCommonService sybaseCommonService,
+                                    Db2CommonService db2CommonService) {
         this.postgresCommonService = postgresCommonService;
         this.oracleCommonService = oracleCommonService;
         this.sqlServerCommonService = sqlServerCommonService;
         this.sybaseCommonService = sybaseCommonService;
+        this.db2CommonService = db2CommonService;
     }
     
     @Value("${mma.sourcedb.connection.type:secretsmanager}")
@@ -89,6 +92,16 @@ public class DatabaseConnectionService {
     }
     
     // Admin connection - read-only queries with rollback
+    public Map<String, Object> executeDb2Query(String schema, String sql) {
+        Map<String, String> credentials = getCredentials(sourceDbConnectionType, sourceDbSecretArn);
+        String jdbcUrl = String.format("jdbc:db2://%s:%s/%s", 
+            credentials.get("host"), credentials.get("port"), credentials.get("dbname"));
+        
+        return executeSimpleQuery(jdbcUrl, credentials.get("username"), credentials.get("password"), 
+            schema, sql, "db2");
+    }
+    
+    // Admin connection - read-only queries with rollback
     public Map<String, Object> executePostgresQuery(String schema, String sql) {
         Map<String, String> credentials = getCredentials(targetDbConnectionType, targetDbSecretArn);
         String jdbcUrl = String.format("jdbc:postgresql://%s:%s/%s", 
@@ -126,6 +139,16 @@ public class DatabaseConnectionService {
         
         return executeTest(jdbcUrl, credentials.get("username"), credentials.get("password"), 
             schema, sql, "sybase");
+    }
+    
+    // Test user connection - read-only with rollback
+    public Map<String, Object> executeDb2TestWithTestUser(String schema, String sql) {
+        Map<String, String> credentials = getCredentials(sourceDbTestType, sourceDbTestSecretArn);
+        String jdbcUrl = String.format("jdbc:db2://%s:%s/%s", 
+            credentials.get("host"), credentials.get("port"), credentials.get("dbname"));
+        
+        return executeTest(jdbcUrl, credentials.get("username"), credentials.get("password"), 
+            schema, sql, "db2");
     }
     
     // Test user connection - read-only with rollback
@@ -188,6 +211,8 @@ public class DatabaseConnectionService {
                             stmt.execute("ALTER SESSION SET CURRENT_SCHEMA = " + validatedSchema);
                         } else if ("postgres".equalsIgnoreCase(engine)) {
                             stmt.execute("SET search_path TO " + validatedSchema + ", public");
+                        } else if ("db2".equalsIgnoreCase(engine)) {
+                            stmt.execute("SET CURRENT SCHEMA " + validatedSchema.toUpperCase());
                         }
                     }
                 }
@@ -262,6 +287,8 @@ public class DatabaseConnectionService {
                             stmt.execute("ALTER SESSION SET CURRENT_SCHEMA = " + validatedSchema);
                         } else if ("postgres".equalsIgnoreCase(engine)) {
                             stmt.execute("SET search_path TO " + validatedSchema + ", public");
+                        } else if ("db2".equalsIgnoreCase(engine)) {
+                            stmt.execute("SET CURRENT SCHEMA " + validatedSchema.toUpperCase());
                         }
                     }
                 }
@@ -382,6 +409,8 @@ public class DatabaseConnectionService {
                 return sqlServerCommonService.splitSqlStatements(sql);
             case "sybase":
                 return sybaseCommonService.splitSqlStatements(sql);
+            case "db2":
+                return db2CommonService.splitSqlStatements(sql);
             default:
                 return Arrays.stream(sql.split(";"))
                     .map(String::trim)
@@ -465,6 +494,8 @@ public class DatabaseConnectionService {
             return String.format("jdbc:mysql://%s:%s/%s", host, port, dbname);
         } else if ("sybase".equalsIgnoreCase(engine)) {
             return String.format("jdbc:sybase:Tds:%s:%s/%s", host, port, dbname);
+        } else if ("db2".equalsIgnoreCase(engine)) {
+            return String.format("jdbc:db2://%s:%s/%s", host, port, dbname);
         } else {
             throw new IllegalArgumentException("Unsupported database engine: " + engine);
         }
@@ -479,6 +510,10 @@ public class DatabaseConnectionService {
             return "com.microsoft.sqlserver.jdbc.SQLServerDriver";
         } else if ("mysql".equalsIgnoreCase(engine)) {
             return "com.mysql.cj.jdbc.Driver";
+        } else if ("sybase".equalsIgnoreCase(engine)) {
+            return "com.sybase.jdbc42.jdbc.SybDriver";
+        } else if ("db2".equalsIgnoreCase(engine)) {
+            return "com.ibm.db2.jcc.DB2Driver";
         } else {
             throw new IllegalArgumentException("Unsupported database engine: " + engine);
         }
@@ -505,6 +540,9 @@ public class DatabaseConnectionService {
                 break;
             case "sybase":
                 Class.forName("com.sybase.jdbc42.jdbc.SybDriver");
+                break;
+            case "db2":
+                Class.forName("com.ibm.db2.jcc.DB2Driver");
                 break;
             default:
                 throw new IllegalArgumentException("Unsupported database engine: " + engine);

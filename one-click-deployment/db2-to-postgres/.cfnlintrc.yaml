@@ -1,0 +1,33 @@
+# cfn-lint configuration for the db2-to-postgres track.
+#
+# Run before every deploy:
+#   cd one-click-deployment/db2-to-postgres
+#   cfn-lint mma-apps-main-stack.yaml mma-nested-stacks/*.yaml
+#
+# This exists because two deploy cycles were lost to service constraints that
+# parse as valid YAML and only fail at CreateStack:
+#   - a template Description over the 1024-character limit
+#   - '->' in a security group rule Description (EC2 rejects '>')
+# cfn-lint catches both in about a second.
+
+templates:
+  - mma-apps-main-stack.yaml
+  - mma-nested-stacks/*.yaml
+
+ignore_checks:
+  # E3691: cfn-lint's RDS engine enum omits 'db2-ce'. RDS for Db2 Community
+  # Edition is a real engine (db2-ce, 12.1 only, BYOL) and provisions correctly -
+  # verified against the live RDS API in eu-west-1. The linter's spec lists
+  # db2-ae and db2-se but not db2-ce, so this is a linter gap, not a bug.
+  # Remove this entry once cfn-lint ships an updated RDS spec.
+  - E3691
+
+  # Warnings below are pre-existing across all three tracks (oracle, sqlserver,
+  # db2) and are stylistic, not correctness issues. Left ignored so that a clean
+  # run means "no real problems" rather than a wall of known noise.
+  - W3005  # DependsOn already implied by GetAtt - harmless, and explicit is clearer
+  - W1020  # Fn::Sub without variables - harmless
+  - W2001  # unused parameter - inherited from the Oracle track's interface
+  - W3037  # IAM action not in cfn-lint's DMS action list (DMS Schema Conversion
+           # actions like describemetadatamodelassessments are newer than the spec)
+  - W1031  # S3 bucket ARN pattern - the 'arn:aws:s3:::bucket' form is correct

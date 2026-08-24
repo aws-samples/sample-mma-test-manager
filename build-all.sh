@@ -11,8 +11,8 @@ echo "=========================================="
 echo ""
 
 SERVERS=(
-    "postgres-client-mcp"
     "db2-luw-client-mcp"
+    "postgres-client-mcp"
     "sqlserver-client-mcp"
     "oracle-client-mcp"
     "mma-test-manager"
@@ -21,7 +21,17 @@ SERVERS=(
 for server in "${SERVERS[@]}"; do
     echo "Building $server..."
     cd "$server"
-    mvn clean package -DskipTests
+    # Prefer the Maven wrapper (self-bootstrapping, no system Maven needed);
+    # fall back to a system mvn if the wrapper is absent.
+    if [ -x ./mvnw ]; then
+        MVN=./mvnw
+    elif command -v mvn >/dev/null 2>&1; then
+        MVN=mvn
+    else
+        echo "❌ Neither ./mvnw nor mvn found for $server"
+        exit 1
+    fi
+    "$MVN" clean package -DskipTests
     if [ $? -eq 0 ]; then
         echo "✅ $server built successfully"
     else

@@ -1,0 +1,385 @@
+Description: EC2 instance with MMA applications
+
+Parameters:
+
+  # PLACEHOLDER - uncomment together with the Option (a) block in
+  # setupEC2DatabaseClient if you choose to install the IBM Data Server Driver
+  # Package. The package is not publicly downloadable, so host it in S3 first
+  # and pass the URI through from the main stack.
+  # Db2ClientS3Uri:
+  #   Type: String
+  #   Default: ''
+  #   Description: >-
+  #     PLACEHOLDER - s3:// URI of the IBM Data Server Driver Package tarball.
+  #     Only needed for an interactive Db2 CLI; the MCP server bundles JCC.
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  
+  SecurityGroupId:
+    Type: String
+  
+  InstanceType:
+    Type: String
+    Default: t3.large
+  
+  VolumeSize:
+    Type: Number
+    Default: 50
+  
+  KeyPairName:
+    Type: String
+    Default: ''
+  
+  StackPrefix:
+    Type: String
+  
+  IAMRoleArn:
+    Type: String
+  
+  IAMInstanceProfile:
+    Type: String
+    Description: IAM instance profile name
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+
+
+Resources:
+  EC2Instance:
+    #checkov:skip=CKV_AWS_88:Public IP required for demo environment access
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref AWS::NoValue]
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          SubnetId: !Ref SubnetId
+          GroupSet:
+            - !Ref SecurityGroupId
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Amazon Linux 2023 ships amazon-ssm-agent preinstalled and enabled, so
+          # this only needs to make sure it is running. Keep this script MINIMAL:
+          # nothing here may delay SSM agent registration, because the first SSM
+          # waiter starts polling as soon as the instance exists.
+          #
+          # `yum update -y` used to run here and was moved to the
+          # ApplySecurityUpdates step in SetupEC2BaseDocument. In UserData it took
+          # 5-10 minutes on AL2023, during which the agent could not register, and
+          # the waiter failed with "InvalidInstanceId: Instances not in a valid
+          # state for account". The instance is still patched - just after it has
+          # registered, where a slow update cannot break the deployment.
+          #
+          # Reinstalling amazon-ssm-agent was also removed: it is already present,
+          # and installing it over itself restarts the agent, delaying the
+          # registration this stack is waiting for.
+          systemctl enable --now amazon-ssm-agent
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-mma-apps-server'
+
+  SetupEC2BaseDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-setup-ec2-software'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Setup database client on ec2
+        parameters:
+          AdminPassword:
+            type: String
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          - name: AddUserVSCodeUser
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub |
+                  echo 'Adding user: {{ VSCodeUser }}'
+                  adduser -c '' {{ VSCodeUser }}
+                  passwd -l {{ VSCodeUser }}
+                  echo "{{ VSCodeUser }}:{{ AdminPassword }}" | chpasswd
+                  usermod -aG wheel {{ VSCodeUser }}
+                - !Sub |
+                  tee /etc/sudoers.d/91-vscode-user <<EOF
+                  {{ VSCodeUser }} ALL=(ALL) NOPASSWD:ALL
+                  EOF
+                - !Sub mkdir -p /home/{{ VSCodeUser }} && chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /home/{{ VSCodeUser }}
+                - !Sub mkdir -p /home/{{ VSCodeUser }}/.local/bin && chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /home/{{ VSCodeUser }}
+                - echo "User added. Checking configuration"
+                - !Sub getent passwd {{ VSCodeUser }}
+          - name: UpdateProfileVSCodeUser
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                - echo LANG=en_US.utf-8 >> /etc/environment
+                - echo LC_ALL=en_US.UTF-8 >> /etc/environment
+                - !Sub echo 'PATH=$PATH:/home/{{ VSCodeUser }}/.local/bin' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo 'export PATH' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo 'export AWS_REGION=${AWS::Region}' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo 'export AWS_ACCOUNTID=${AWS::AccountId}' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo 'export NEXT_TELEMETRY_DISABLED=1' >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub echo "export PS1='\[\033[01;32m\]\u:\[\033[01;34m\]\w\[\033[00m\]\$ '" >> /home/{{ VSCodeUser }}/.bashrc
+                - !Sub chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /home/{{ VSCodeUser }}
+          # Security patching. This runs HERE, as an SSM step, rather than in
+          # UserData where it used to live.
+          #
+          # In UserData it ran before the SSM agent could register, and on AL2023
+          # a full update takes 5-10 minutes - long enough that the first SSM
+          # waiter gave up with "InvalidInstanceId: Instances not in a valid state
+          # for account" and failed the stack. By this point the instance is
+          # already a registered managed instance, so a slow update delays the
+          # step but cannot break registration, and the waiter's own timeout
+          # covers it.
+          #
+          # Patching is NOT optional: an unpatched EC2 instance in an Amazon
+          # account raises security findings, so removing the update outright is
+          # not an acceptable trade even for a short-lived workshop host.
+          #
+          # Ordering: before InstallBasePackages, so the packages installed next
+          # come from an already-updated repo state and dnf is not run twice
+          # against a changing set of metadata.
+          - name: ApplySecurityUpdates
+            action: aws:runShellScript
+            inputs:
+              # Must fit inside the waiter's budget, NOT just be generous: the
+              # SSM waiter Lambda hard-stops at 900s (the AWS maximum) and that
+              # ceiling covers registration + send + polling for the WHOLE
+              # document. A step timeout longer than the waiter's window would
+              # simply be cut short by the Lambda giving up first.
+              # 600s is enough for --security on a current AL2023 AMI, which
+              # typically has a small security backlog.
+              timeoutSeconds: 600
+              runCommand:
+                - '#!/bin/bash'
+                - |
+                  echo "=========================================="
+                  echo "Applying OS security updates..."
+                  # --security limits this to security advisories, which is both
+                  # what the finding requires and considerably faster than a full
+                  # `dnf update`.
+                  #
+                  # Never fail the step on a patching problem: a package mirror
+                  # hiccup should not destroy a 45-minute deployment. The exit
+                  # status is logged so a failure is visible in the step output.
+                  if dnf update --security -y; then
+                    echo "Security updates applied successfully."
+                  else
+                    echo "WARNING: 'dnf update --security' returned non-zero."
+                    echo "The instance may not be fully patched - check this output."
+                  fi
+                  echo "Completed at $(date)"
+                  echo "=========================================="
+          - name: InstallBasePackages
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub |
+                  echo "=========================================="
+                  # Required packages installation
+                  # jq is required by the Db2/Postgres schema SSM documents,
+                  # which parse Secrets Manager JSON with it under
+                  # `set -euo pipefail`.
+                  echo "Install java-21 git maven wget zip unzip jq"
+                  dnf install -y java-21-amazon-corretto-devel java-21-amazon-corretto git maven-amazon-corretto21 wget zip unzip jq nginx curl-minimal gnupg whois argon2 openssl
+                  echo "=========================================="
+          - name: InstallAWSCLI
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                - mkdir -p /tmp
+                - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip -o /tmp/aws-cli.zip
+                - !Sub chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /tmp/aws-cli.zip
+                - unzip -q -d /tmp /tmp/aws-cli.zip
+                - sudo /tmp/aws/install
+                - rm -rf /tmp/aws
+                - echo "AWS CLI installed. Checking configuration"
+                - aws --version
+          - name: ConfigureCodeServer
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 600
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub export HOME=/home/{{ VSCodeUser }}
+                - curl -fsSL https://code-server.dev/install.sh | bash -s -- 2>&1
+                - !Sub systemctl enable --now code-server@{{ VSCodeUser }} 2>&1
+
+                - !Sub mkdir -p /home/{{ VSCodeUser }}/.config/code-server
+                - !Sub |
+                  tee /home/{{ VSCodeUser }}/.config/code-server/config.yaml <<EOF
+                  cert: false
+                  auth: password
+                  hashed-password: "$(echo -n {{ AdminPassword }} | argon2 $(openssl rand -base64 12) -e)"
+                  EOF
+                - !Sub mkdir -p /home/{{ VSCodeUser }}/.local/share/code-server/User/
+                - !Sub touch /home/{{ VSCodeUser }}/.hushlogin
+                - !Sub mkdir -p /workshop && chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /workshop
+                - !Sub |
+                  tee /home/{{ VSCodeUser }}/.local/share/code-server/User/settings.json <<EOF
+                  {
+                    "extensions.autoUpdate": false,
+                    "extensions.autoCheckUpdates": false,
+                    "telemetry.telemetryLevel": "off",
+                    "security.workspace.trust.startupPrompt": "never",
+                    "security.workspace.trust.enabled": false,
+                    "security.workspace.trust.banner": "never",
+                    "security.workspace.trust.emptyWindow": false,
+                    "auto-run-command.rules": [
+                      {
+                        "command": "workbench.action.terminal.new"
+                      }
+                    ]
+                  }
+                  EOF
+                - !Sub chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /home/{{ VSCodeUser }}
+                - !Sub systemctl restart code-server@{{ VSCodeUser }}
+                - systemctl restart nginx
+                - !Sub sudo -u {{ VSCodeUser }} --login code-server --install-extension AmazonWebServices.aws-toolkit-vscode --force
+                - !Sub sudo -u {{ VSCodeUser }} --login code-server --install-extension AmazonWebServices.amazon-q-vscode --force
+                - !Sub sudo -u {{ VSCodeUser }} --login code-server --install-extension ms-vscode.live-server --force
+                - !Sub sudo -u {{ VSCodeUser }} --login code-server --install-extension synedra.auto-run-command --force
+                - !Sub chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /home/{{ VSCodeUser }}
+                - echo "Nginx installed. Checking configuration"
+                - nginx -t 2>&1
+                - systemctl status nginx
+                - echo "CodeServer installed. Checking configuration"
+                - code-server -v
+                - !Sub systemctl status code-server@{{ VSCodeUser }}
+          - name: setupEC2DatabaseClient
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub |
+                  # ============================================================
+                  # Db2 command-line client: DELIBERATELY NOT INSTALLED
+                  # ------------------------------------------------------------
+                  # This is a workshop design decision, not an unfinished task.
+                  #
+                  # Nothing in the workshop needs a Db2 CLI:
+                  #   - the MCP server uses the bundled IBM JCC JDBC driver;
+                  #   - demo schema deployment uses Db2ScriptRunner over JDBC
+                  #     (see DeployDb2SchemaDocument in demo-infrastructure.yaml);
+                  #   - participants interact through Kiro CLI, the MCP server,
+                  #     and the Test Manager UI - never a shell client.
+                  #
+                  # Why not install one anyway: the IBM Data Server Driver
+                  # Package (db2cli / CLPPlus) requires an IBM account to
+                  # download and cannot be fetched unattended, so every
+                  # participant would need to register with IBM. The JCC driver,
+                  # by contrast, comes from Maven Central. This is unlike the
+                  # SQL Server track, where mssql-tools18 installs with a plain
+                  # dnf install from a public Microsoft repo.
+                  #
+                  # If you want an interactive SQL client for debugging, prefer a
+                  # JDBC-based one (sqlline, DBeaver CLI) with the JCC jar - no
+                  # IBM download required. To install the IBM package regardless,
+                  # host the tarball in S3, add a Db2ClientS3Uri parameter, and
+                  # uncomment the example below.
+                  # ============================================================
+                  echo "Db2 client install: intentionally skipped (JDBC only)"
+                  echo "The db2-luw-client-mcp server bundles the IBM JCC driver,"
+                  echo "and schema deployment uses Db2ScriptRunner over JDBC."
+                  echo "No Db2 CLI is required for any part of this workshop."
+                  echo "=========================================="
+
+                  # --- Option (a) example, requires Db2ClientS3Uri parameter ---
+                  # echo "Installing IBM Data Server Driver Package..."
+                  # aws s3 cp "${!Db2ClientS3Uri}" /tmp/ibm_data_server_driver_package.tar.gz
+                  # mkdir -p /opt/ibm && tar xzf /tmp/ibm_data_server_driver_package.tar.gz -C /opt/ibm
+                  # /opt/ibm/dsdriver/installDSDriver
+                  # su - {{ VSCodeUser }} <<EOD1S
+                  # echo 'export IBM_DB_HOME=/opt/ibm/dsdriver' >> ~/.bash_profile
+                  # echo 'export PATH=\$IBM_DB_HOME/bin:\$PATH' >> ~/.bash_profile
+                  # EOD1S
+                  # echo "Db2 client installation completed"
+                  # echo "=========================================="
+                  
+                  echo "Installing SQL Server Client..."
+                  curl https://packages.microsoft.com/config/rhel/9.0/prod.repo | tee /etc/yum.repos.d/mssql-release.repo
+                  ACCEPT_EULA=Y dnf install -y mssql-tools18 unixODBC-devel
+                  su - {{ VSCodeUser }} <<EOD3S
+                  echo 'export PATH=/opt/mssql-tools18/bin:\$PATH' >> ~/.bash_profile
+                  EOD3S
+                  echo "SQL Server Client Installation Completed"
+                  echo "SQL Server Client Version: $(/opt/mssql-tools18/bin/sqlcmd -?)"
+                  echo "=========================================="
+                  
+                  echo "Installing PostgreSQL Client..."
+                  dnf install -y postgresql17-contrib postgresql17
+                  echo "PostgreSQL Client Installation Completed"
+                  echo "PostgreSQL Client Version: $(psql -V)"
+                  echo "=========================================="
+          - name: InstallKiroCLI
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - |
+                  su - {{ VSCodeUser }} <<'EOFKIRO'
+                  curl -fsSL https://cli.kiro.dev/install | bash
+                  export PATH="$HOME/.local/bin:$PATH"
+                  echo "Kiro CLI Installation Completed"
+                  echo "Kiro CLI Version: $(kiro-cli -V)"
+                  echo "=========================================="
+                  EOFKIRO
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+  
+  PrivateIp:
+    Description: Private IP address
+    Value: !GetAtt EC2Instance.PrivateIp
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateIp'
+  
+  PublicIp:
+    Description: Public IP address 
+    Value: !GetAtt EC2Instance.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicIp'
+  
+  PrivateDnsName:
+    Description: Private DNS name
+    Value: !GetAtt EC2Instance.PrivateDnsName
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateDnsName'
+  
+  PublicDnsName:
+    Description: Public DNS name
+    Value: !GetAtt EC2Instance.PublicDnsName
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicDnsName'
+
+  SetupEC2BaseDocumentName:
+    Description: SSM document name for EC2 instance base setup
+    Value: !Ref SetupEC2BaseDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-SetupEC2BaseDocumentName'

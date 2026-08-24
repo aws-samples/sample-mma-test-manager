@@ -24,6 +24,7 @@ public class DdlService {
     private final PostgresCommonService postgresqlService;
     private final SQLServerCommonService sqlServerService;
     private final SybaseCommonService sybaseService;
+    private final Db2CommonService db2Service;
 
     @Transactional
     public void retrieveSourceDdlFromDb(Long objectId) {
@@ -70,6 +71,8 @@ public class DdlService {
             return sqlServerService.extractSourceDdl(objectId);
         } else if ("sybase".equalsIgnoreCase(sourceEngine)) {
             return sybaseService.extractSourceDdl(objectId);
+        } else if ("db2".equalsIgnoreCase(sourceEngine)) {
+            return db2Service.extractSourceDdl(objectId);
         }
         
         throw new UnsupportedOperationException("Source database engine not supported: " + sourceEngine);
@@ -265,6 +268,8 @@ public class DdlService {
             case "postgres", "postgresql" -> "PostgreSQL";
             case "sqlserver" -> "SQL Server";
             case "mysql" -> "MySQL";
+            case "sybase" -> "Sybase ASE";
+            case "db2" -> "Db2 LUW";
             default -> dbEngine.substring(0, 1).toUpperCase() + dbEngine.substring(1);
         };
     }

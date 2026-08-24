@@ -1,0 +1,1056 @@
+Description: MMA Applications Deployment - Modular Architecture with Nested Stacks
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VpcId
+          - Ec2SubnetId
+          - PrivSubnetId1
+          - PrivSubnetId2
+      - Label:
+          default: Access Configuration
+        Parameters:
+          - UseCloudFront
+          - AdminPassword
+          - VSCodeUser
+      - Label:
+          default: EC2 Instance Configuration
+        Parameters:
+          - InstanceType
+          - InstanceVolumeSize
+          - KeyPairName
+      - Label:
+          default: Application Deployment
+        Parameters:
+          - StackPrefix
+          - CodeURL
+          - CodeBucket
+          - TemplateS3Bucket
+          - TemplateS3Prefix
+          - EnableDeletionProtection
+      - Label:
+          default: Demo Infrastructure (Optional)
+        Parameters:
+          - DeployDemoInfra
+          - DemoSQLScriptsURL
+          - DemoScriptsBucket
+          - DemoScriptsPrefix
+          - LicenseConfigurationName
+          - Db2CustomerId
+          - Db2SiteId
+          - Db2EngineVersion
+          - Db2InstanceClass
+          - DmsEngineVersion
+      - Label:
+          default: Manual Database Configuration (If DeployDemoInfra=false)
+        Parameters:
+          - Db2SecretArn
+          - PostgresSecretArn
+          - Db2TestSecretArn
+          - PostgresTestSecretArn
+          - S3DMSProjectPath
+    ParameterLabels:
+      VpcId:
+        default: VPC ID
+      Ec2SubnetId:
+        default: EC2 Public Subnet
+      PrivSubnetId1:
+        default: Private Subnet 1
+      PrivSubnetId2:
+        default: Private Subnet 2
+      UseCloudFront:
+        default: Use CloudFront Distribution
+      AdminPassword:
+        default: Admin Password
+      VSCodeUser:
+        default: VS Code Username
+      InstanceType:
+        default: Instance Type
+      InstanceVolumeSize:
+        default: Volume Size (GB)
+      KeyPairName:
+        default: EC2 Key Pair (Optional)
+      StackPrefix:
+        default: Stack Prefix
+      CodeURL:
+        default: Application Code URL
+      CodeBucket:
+        default: Application Code S3 Bucket
+      TemplateS3Bucket:
+        default: Templates S3 Bucket
+      TemplateS3Prefix:
+        default: Templates S3 Prefix
+      EnableDeletionProtection:
+        default: RDS Deletion Protection (true keeps databases on stack delete)
+      DeployDemoInfra:
+        default: Deploy Demo Infrastructure
+      DemoSQLScriptsURL:
+        default: Demo SQL Scripts URL
+      DemoScriptsBucket:
+        default: Demo SQL Scripts S3 Bucket
+      DemoScriptsPrefix:
+        default: Demo SQL Scripts S3 Prefix
+      LicenseConfigurationName:
+        default: Db2 CE Licence Configuration Name
+      Db2CustomerId:
+        default: IBM Db2 Customer ID (required, free for CE)
+      Db2SiteId:
+        default: IBM Db2 Site ID (required, free for CE)
+      Db2EngineVersion:
+        default: Db2 CE Engine Version
+      Db2InstanceClass:
+        default: Db2 Instance Class
+      DmsEngineVersion:
+        default: DMS Engine Version
+      Db2SecretArn:
+        default: Db2 Admin Secret ARN
+      PostgresSecretArn:
+        default: PostgreSQL Admin Secret ARN
+      Db2TestSecretArn:
+        default: Db2 Test User Secret ARN
+      PostgresTestSecretArn:
+        default: PostgreSQL Test User Secret ARN
+      S3DMSProjectPath:
+        default: DMS Project S3 Path
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Select existing VPC
+  
+  Ec2SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select public subnet for EC2 (Public subnet is required for Ngnix/CloudFront)
+  
+  PrivSubnetId1:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select first subnet in different AZ (for Repo database and optional demo infra)
+
+  PrivSubnetId2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select second subnet in different AZ (for Repo database and optional demo infra)
+  
+  UseCloudFront:
+    Type: String
+    Description: Use CloudFront (true) or nginx (false)
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
+  AdminPassword:
+    Type: String
+    Description: Password for VS Code and Test Manager login (min 8 chars, must include uppercase, lowercase, digit, and special character)
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z\d]).+$'
+    ConstraintDescription: "Must be at least 8 characters and include uppercase, lowercase, digit, and special character. Avoid $, #, {, } as they may conflict with shell processing"
+  
+  VSCodeUser:
+    Type: String
+    Description: VS Code user name
+    Default: awsmma
+
+  InstanceType:
+    Type: String
+    Default: t3.large
+  
+  InstanceVolumeSize:
+    Type: Number
+    Default: 50
+  
+  KeyPairName:
+    Type: String
+    Default: ''
+
+  StackPrefix:
+    Type: String
+    Default: mma
+    AllowedPattern: ^[a-z0-9-]{3,20}$
+  
+  CodeURL:
+    Type: String
+    Description: >-
+      Location of the application code zip. An S3 location is downloaded with
+      the AWS CLI using the instance role, so the bucket can stay private -
+      accepted as s3://bucket/key or an https S3 URL. A non-S3 HTTPS URL is
+      fetched with wget and must be publicly reachable. When using S3, also set
+      CodeBucket so the instance role is granted read access.
+    Default: 'https://ws-assets-prod-iad-r-iad-ed304a55c2ca1aee.s3.us-east-1.amazonaws.com/8fdbbd5d-8c0d-4395-976c-86466cd4f269/mma-apps.zip'
+
+  # Bucket named in CodeURL, when the archive is hosted in S3.
+  #
+  # Required as a separate parameter because CloudFormation cannot parse a
+  # bucket name out of the CodeURL string to build an IAM resource ARN. Leave
+  # empty for a non-S3 CodeURL; no grant is then added and RepoDownloadDocument
+  # falls back to wget.
+  CodeBucket:
+    Type: String
+    Default: ''
+    Description: >-
+      S3 bucket holding the code archive referenced by CodeURL. Set this when
+      CodeURL is an S3 location so the instance role can read it. Empty means
+      CodeURL is fetched over plain HTTPS.
+  
+  TemplateS3Bucket:
+    Type: String
+    Description: S3 bucket containing nested stack templates
+  
+  TemplateS3Prefix:
+    Type: String
+    Description: S3 prefix for templates
+    Default: mma-nested-stacks/
+
+  DeployDemoInfra:
+    Type: String
+    Description: Deploy demo infrastructure (Db2, PostgreSQL, DMS)
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  
+  DemoSQLScriptsURL:
+    Type: String
+    Description: >-
+      Optional. Leave EMPTY to use the Db2 demo scripts staged in S3 by the
+      deploy script (recommended). Set to an HTTPS zip URL only to override them.
+    Default: ''
+
+  # Bucket into which deploy-with-demo-infra.sh uploads
+  # one-click-deployment/db2-to-postgres/demo-scripts/ before create-stack.
+  #
+  # This exists because the scripts CANNOT reliably be read from the code
+  # checkout. CodeURL defaults to a published Workshop Studio asset that
+  # predates the Db2 track: its one-click-deployment/ contains only the oracle
+  # and sqlserver directories, so demo-scripts/ is absent and
+  # RunDemoSetupEnvironment failed on the missing path. RunRepoDownload reports
+  # success regardless, because the download and unzip themselves work - only
+  # the content is wrong.
+  #
+  # The upload must happen BEFORE create-stack, which is why the bucket is
+  # created by the deploy script rather than by this template: SSM documents run
+  # DURING stack creation, so a bucket created here would still be empty when
+  # RunDemoSetupEnvironment reads it.
+  #
+  # Empty falls back to reading the checkout, which still works for a CodeURL
+  # archive built from this repo.
+  DemoScriptsBucket:
+    Type: String
+    Default: ''
+    Description: >-
+      S3 bucket holding the Db2 demo SQL scripts, populated by the deploy
+      script. Empty means read them from the repo checkout instead.
+
+  DemoScriptsPrefix:
+    Type: String
+    Default: 'demo-scripts/'
+    Description: Key prefix for the demo SQL scripts within DemoScriptsBucket.
+
+  # The Db2 demo scripts are COMMITTED IN THE REPO at
+  #   one-click-deployment/db2-to-postgres/demo-scripts/
+  # and are staged onto the instance from DemoScriptsBucket (above), so they
+  # cannot drift from the Db2ScriptRunner and SSM document that consume them.
+  #
+  # DemoSQLScriptsURL previously defaulted to a db2-scripts.zip URL on the
+  # Oracle track's asset bucket that was never published, so DeployDemoInfra=true
+  # could not populate a schema. It is retained, defaulting to empty, purely as
+  # an override: supply a zip URL to test revised scripts without re-uploading.
+  # The zip must then contain all six files below.
+  #
+  # Scripts used (all present in demo-scripts/):
+  #   01_user_rds_db2_phase1.sql   (RDSADMIN: bufferpool, tablespaces, users)
+  #   01_user_rds_db2_phase2.sql   (BOBSDB:   schema and privileges)
+  #   01_user_rds_db2_phase3.sql   (BOBSDB:   read-only grants, runs last)
+  #   02_schema_db2_v2.sql
+  #   03_data_db2_v2.sql
+  #   04_complex_schema_db2_v2.sql
+  # SetupEnvironmentDocument verifies all six are staged and non-empty before
+  # DeployDb2SchemaDocument runs, so an incomplete set fails early with a list.
+  #
+  # 01_user_db2.sql (the self-managed Db2 LUW variant) is deliberately NOT
+  # included: it issues native CREATE BUFFERPOOL / CREATE TABLESPACE, which RDS
+  # rejects because the master user lacks SYSADM/SYSCTRL.
+  EnableDeletionProtection:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      RDS deletion protection for the Test Manager repository cluster and the
+      demo Db2/Aurora databases. Default false so the stack can be deleted with
+      a single delete-stack call. Set to true if the repo database holds test
+      definitions or results you need to keep - with false, deleting the stack
+      destroys them with no confirmation prompt.
+
+  DmsEngineVersion:
+    Type: String
+    Default: 3.6.1
+    Description: >-
+      DMS replication instance engine version. Pinned so it cannot drift between
+      deployments; Db2 LUW source support varies by DMS version. Check what is
+      orderable in your region with:
+      aws dms describe-orderable-replication-instances --region <region>
+      --query 'OrderableReplicationInstances[].EngineVersion'
+
+  # Name of the License Manager self-managed licence configuration for RDS for
+  # Db2 CE. The stack creates a configuration with this name if one does not
+  # already exist, and reuses it if it does. Independent of StackPrefix because a
+  # licence configuration is regional and account-wide, so multiple stacks in one
+  # region share it rather than each creating their own.
+  LicenseConfigurationName:
+    Type: String
+    Default: mma-db2-ce-license
+    Description: >-
+      Name for the self-managed licence configuration for RDS for Db2 Community
+      Edition (filtered on Engine Edition = db2-ce). Used only if the region has
+      no db2-ce configuration yet; an existing one is adopted, because License
+      Manager permits only one configuration per filter value.
+
+  Db2CustomerId:
+    Type: String
+    Default: ''
+    MaxLength: 32
+    AllowedPattern: '^[0-9]*$'
+    ConstraintDescription: IBM Customer ID must be numeric.
+    Description: >-
+      IBM customer ID for RDS for Db2 licensing. REQUIRED when
+      DeployDemoInfra=true - a template Rule rejects the stack if it is empty.
+      Db2 Community Edition (db2-ce) is BYOL-only; the licence is free but
+      registration with IBM is required to get this ID.
+      Register: https://www.ibm.com/account/reg/us-en/signup?formid=urx-54367
+      Supply at deploy time. Do NOT set a Default here - this template is
+      intended for publication, and a licence identifier is customer-specific.
+    NoEcho: true
+
+  Db2SiteId:
+    Type: String
+    Default: ''
+    MaxLength: 32
+    AllowedPattern: '^[0-9]*$'
+    ConstraintDescription: IBM Site ID must be numeric.
+    Description: >-
+      IBM site ID for RDS for Db2 licensing. REQUIRED when
+      DeployDemoInfra=true - a template Rule rejects the stack if it is empty.
+      Free to obtain by registering with IBM (see Db2CustomerId).
+      Supply at deploy time; see the note on Db2CustomerId about Defaults.
+    NoEcho: true
+
+  Db2EngineVersion:
+    Type: String
+    Default: 12.1.4.0.sb00085812.r1
+    Description: >-
+      RDS for Db2 CE engine version. CE ships as 12.1 only, but RDS requires
+      the fully-qualified build string rather than the bare major.minor.
+      Confirm availability in your region with:
+      aws rds describe-db-engine-versions --engine db2-ce
+
+  Db2InstanceClass:
+    Type: String
+    Default: db.m7i.large
+    AllowedValues:
+      - db.m7i.large
+      - db.t3.small
+    Description: >-
+      RDS instance class for the demo Db2 CE instance. db.m7i.large is
+      confirmed available for this configuration; db.t3.small is the fallback.
+
+  Db2SecretArn:
+    Type: String
+    Description: ARN of Secrets Manager secret containing Db2 admin credentials
+    Default: ''
+  PostgresSecretArn:
+    Type: String
+    Description: ARN of Secrets Manager secret containing PostgreSQL admin credentials
+    Default: ''
+  Db2TestSecretArn:
+    Type: String
+    Description: ARN of Secrets Manager secret containing Db2 read-only user credentials
+    Default: ''
+  PostgresTestSecretArn:
+    Type: String
+    Description: ARN of Secrets Manager secret containing PostgreSQL read-only user credentials
+    Default: ''
+  S3DMSProjectPath:
+    Type: String
+    Description: S3 path where DMS Schema Conversion project files are stored (e.g. s3://my-bucket/my-project, required if DeployDemoInfra=false)
+    Default: ''
+  S3DMSProjectBucket:
+    Type: String
+    Description: S3 bucket name containing DMS Schema Conversion project files (e.g. my-bucket, required if DeployDemoInfra=false)
+    Default: ''
+
+Rules:
+  # RDS for Db2 Community Edition is BYOL-only and will not create without both
+  # IBM licence identifiers. Enforcing that here means the stack is rejected at
+  # validation time, before any resource is created. Without this rule the
+  # failure surfaces roughly 10 minutes in, on the Db2 instance, and because
+  # the deploy script uses --disable-rollback that leaves a partially built
+  # environment to clean up by hand.
+  Db2LicenceIdsRequiredWithDemoInfra:
+    RuleCondition: !Equals [!Ref DeployDemoInfra, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref Db2CustomerId, '']]
+        AssertDescription: >-
+          Db2CustomerId is required when DeployDemoInfra=true. RDS for Db2
+          Community Edition is bring-your-own-licence. The licence is free but
+          you must register with IBM to obtain a Customer ID:
+          https://www.ibm.com/account/reg/us-en/signup?formid=urx-54367
+      - Assert: !Not [!Equals [!Ref Db2SiteId, '']]
+        AssertDescription: >-
+          Db2SiteId is required when DeployDemoInfra=true. Free to obtain by
+          registering with IBM (see Db2CustomerId).
+
+Conditions:
+  DeployDemo: !Equals [!Ref DeployDemoInfra, 'true']
+  NoDemo: !Not [!Equals [!Ref DeployDemoInfra, 'true']]
+  UseCloudFront: !Equals [!Ref UseCloudFront, 'true']
+  UseNginx: !Not [!Equals [!Ref UseCloudFront, 'true']]
+  # Gates the instance-role grant for the demo scripts bucket. An empty bucket
+  # name means the scripts come from the repo checkout instead, so there is
+  # nothing to grant - and an ARN built from an empty string would be invalid.
+  HasDemoScriptsBucket: !And
+    - !Condition DeployDemo
+    - !Not [!Equals [!Ref DemoScriptsBucket, '']]
+
+  # Gates the instance-role grant for the code archive bucket. Empty means
+  # CodeURL is a plain HTTPS URL fetched with wget, so no S3 grant applies -
+  # and an ARN built from an empty string would be invalid.
+  HasCodeBucket: !Not [!Equals [!Ref CodeBucket, '']]
+
+
+Resources:
+  ###############################################################################################
+  ### IAM Resources
+  ###############################################################################################
+  
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com, ssm.amazonaws.com]
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${StackPrefix}-testmgr-db-secret*'
+        - PolicyName: CloudFormationAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ListStacks
+                  - cloudformation:ListTypes
+                Resource: '*'
+        - PolicyName: SecretsManagerCMKAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:CreateGrant
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey*
+                Resource: !GetAtt SecretsManagerCMK.Arn
+        # Read access to the code archive, so RepoDownloadDocument can fetch it
+        # with `aws s3 cp` under this role instead of an unauthenticated wget -
+        # which is what allows the bucket to stay private.
+        #
+        # Inline on the role rather than a separate AWS::IAM::Policy so it is in
+        # place before the instance launches, with no conditional DependsOn.
+        # Read-only: the instance consumes the archive, never publishes it.
+        #
+        # When CodeBucket is empty the archive is fetched over plain HTTPS and no
+        # grant is needed, but an ARN built from an empty string would be
+        # malformed. !If then points the statement at the templates bucket, which
+        # the instance may legitimately read, rather than widening access.
+        - PolicyName: CodeArchiveAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !If
+                  - HasCodeBucket
+                  - !Sub 'arn:${AWS::Partition}:s3:::${CodeBucket}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${TemplateS3Bucket}/*'
+              # ListBucket applies to the bucket ARN, and lets a missing object
+              # fail as a clear 404 rather than an ambiguous AccessDenied.
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !If
+                  - HasCodeBucket
+                  - !Sub 'arn:${AWS::Partition}:s3:::${CodeBucket}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${TemplateS3Bucket}'
+  
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref EC2Role]
+
+  EC2DemoPolicy:
+    Type: AWS::IAM::Policy
+    Condition: DeployDemo
+    Properties:
+      PolicyName: !Sub '${StackPrefix}-ec2-demo-policy'
+      Roles: [!Ref EC2Role]
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${StackPrefix}-demo-secret-db2-admin*'
+              - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${StackPrefix}-demo-secret-postgres-admin*'
+              - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${StackPrefix}-demo-db2-ro-user*'
+              - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${StackPrefix}-demo-postgres-ro-user*'
+          - Effect: Allow
+            Action:
+              - dms:DescribeConnections
+              - dms:DescribeEndpoints
+              - dms:DescribeReplicationInstances
+              - dms:DescribeReplicationTasks
+              - dms:DescribeMetadataModelAssessments
+              - dms:DescribeMetadataModelConversions
+              - dms:DescribeMetadataModelExportsToTarget
+              - dms:DescribeDataProviders
+              - dms:DescribeMigrationProjects
+              - dms:ListMigrationProjects
+              - dms:ListDataProviders
+              - dms:ListMetadataModelAssessments
+              - dms:ListMetadataModelConversions
+              - dms:ListMetadataModelExports
+              - dms:AddTagsToResource
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - dms:CreateReplicationTask
+              - dms:TestConnection
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:dms:${AWS::Region}:${AWS::AccountId}:endpoint:*'
+              - !Sub 'arn:${AWS::Partition}:dms:${AWS::Region}:${AWS::AccountId}:rep:*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Name':
+                  - !Sub '${StackPrefix}-demo-db2-source-endpoint'
+                  - !Sub '${StackPrefix}-demo-postgres-target-endpoint'
+                  - !Sub '${StackPrefix}-demo-dms-instance'
+          - Effect: Allow
+            Action:
+              - dms:StartMetadataModelAssessment
+              - dms:StartMetadataModelConversion
+              - dms:StartMetadataModelExportToTarget
+            Resource: !Sub 'arn:${AWS::Partition}:dms:${AWS::Region}:${AWS::AccountId}:migration-project:*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Name': !Sub '${StackPrefix}-demo-dms-sc-migration-project'
+          - Effect: Allow
+            Action: dms:StartReplicationTask
+            Resource: !Sub 'arn:${AWS::Partition}:dms:${AWS::Region}:${AWS::AccountId}:task:*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Name': !Sub '${StackPrefix}-demo-data-migration-task'
+          - Effect: Allow
+            Action: [s3:GetObject, s3:ListBucket, s3:PutObject, s3:DeleteObject]
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${StackPrefix}-dms-sc-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${StackPrefix}-dms-sc-${AWS::AccountId}/*'
+          # Read-only access to the demo SQL scripts bucket, so
+          # SetupEnvironmentDocument can copy them to /home/<user>/mma-demo.
+          #
+          # Read-only by design: the instance consumes these scripts and never
+          # publishes them. The deploy script does the uploading, using the
+          # operator's own credentials.
+          #
+          # When DemoScriptsBucket is empty the scripts come from the repo
+          # checkout and no grant is needed, but an ARN built from an empty
+          # string would be malformed and rejected by IAM. !If substitutes the
+          # DMS bucket - already granted above, so the statement is a harmless
+          # duplicate rather than a widened permission. AWS::NoValue is not
+          # usable here: it would leave Resource absent, which is invalid.
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: !If
+              - HasDemoScriptsBucket
+              - !Sub 'arn:${AWS::Partition}:s3:::${DemoScriptsBucket}/${DemoScriptsPrefix}*'
+              - !Sub 'arn:${AWS::Partition}:s3:::${StackPrefix}-dms-sc-${AWS::AccountId}/*'
+          # ListBucket applies to the bucket ARN rather than the object ARN, and
+          # is required because `aws s3 cp --recursive` enumerates the prefix
+          # before copying. The prefix condition stops the role listing the rest
+          # of the bucket.
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource: !If
+              - HasDemoScriptsBucket
+              - !Sub 'arn:${AWS::Partition}:s3:::${DemoScriptsBucket}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${StackPrefix}-dms-sc-${AWS::AccountId}'
+            Condition:
+              StringLike:
+                's3:prefix': !If
+                  - HasDemoScriptsBucket
+                  - !Sub '${DemoScriptsPrefix}*'
+                  - '*'
+
+  EC2ManualPolicy:
+    Type: AWS::IAM::Policy
+    Condition: NoDemo
+    Properties:
+      PolicyName: !Sub '${StackPrefix}-ec2-manual-policy'
+      Roles: [!Ref EC2Role]
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: [s3:GetObject, s3:ListBucket]
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${S3DMSProjectBucket}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${S3DMSProjectBucket}/*'
+
+  SecretsManagerCMK:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'CMK for encrypting Secrets Manager secrets in ${StackPrefix}'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Id: secretsmanager-cmk-policy
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSecretsManagerAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:CreateGrant
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService: !Sub 'secretsmanager.${AWS::Region}.amazonaws.com'
+          - Sid: AllowSecretsManagerGenerateDataKey
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:GenerateDataKey*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+              StringLike:
+                kms:ViaService: !Sub 'secretsmanager.${AWS::Region}.amazonaws.com'
+          - Sid: AllowS3Access
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
+          - Sid: AllowRootKeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  SecretsManagerCMKAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${StackPrefix}-secrets-cmk'
+      TargetKeyId: !Ref SecretsManagerCMK
+
+  
+  ###############################################################################################
+  ### Nested Stacks
+  ###############################################################################################
+  
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}network-stack.yaml'
+      Parameters:
+        VpcId: !Ref VpcId
+        SubnetId: !Ref Ec2SubnetId
+        StackPrefix: !Ref StackPrefix
+        UseCloudFront: !Ref UseCloudFront
+      TimeoutInMinutes: 10
+  
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}database-stack.yaml'
+      Parameters:
+        VpcId: !Ref VpcId
+        SubnetIds: !Join [',', [!Ref PrivSubnetId1, !Ref PrivSubnetId2]]
+        SecurityGroupId: !GetAtt NetworkStack.Outputs.SecurityGroupId
+        StackPrefix: !Ref StackPrefix
+        KmsKeyId: !Ref SecretsManagerCMK
+        EnableDeletionProtection: !Ref EnableDeletionProtection
+      TimeoutInMinutes: 30
+  
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}compute-stack.yaml'
+      Parameters:
+        SubnetId: !Ref Ec2SubnetId
+        SecurityGroupId: !GetAtt NetworkStack.Outputs.SecurityGroupId
+        InstanceType: !Ref InstanceType
+        VolumeSize: !Ref InstanceVolumeSize
+        KeyPairName: !Ref KeyPairName
+        StackPrefix: !Ref StackPrefix
+        IAMRoleArn: !GetAtt EC2Role.Arn
+        IAMInstanceProfile: !Ref EC2InstanceProfile
+      TimeoutInMinutes: 15
+  
+  DemoInfraStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployDemo
+    # LicenseManagerStack must complete first: the Db2 CE instance created here
+    # cannot verify its BYOL licence without the db2-ce licence configuration.
+    DependsOn: [ComputeStack, LicenseManagerStack]
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}demo-infrastructure.yaml'
+      Parameters:
+        VpcId: !Ref VpcId
+        SubnetIds: !Join [',', [!Ref PrivSubnetId1, !Ref PrivSubnetId2]]
+        EC2SecurityGroupId: !GetAtt NetworkStack.Outputs.SecurityGroupId        
+        StackPrefix: !Ref StackPrefix
+        DemoSQLScriptsURL: !Ref DemoSQLScriptsURL
+        DemoScriptsBucket: !Ref DemoScriptsBucket
+        DemoScriptsPrefix: !Ref DemoScriptsPrefix
+        KmsKeyId: !Ref SecretsManagerCMK
+        KmsKeyArn: !GetAtt SecretsManagerCMK.Arn
+        # IBM Db2 licence identifiers, required by RDS for Db2 CE.
+        # Empty defaults will cause the Db2 instance to fail creation.
+        Db2CustomerId: !Ref Db2CustomerId
+        Db2SiteId: !Ref Db2SiteId
+        Db2EngineVersion: !Ref Db2EngineVersion
+        Db2InstanceClass: !Ref Db2InstanceClass
+        EnableDeletionProtection: !Ref EnableDeletionProtection
+        DmsEngineVersion: !Ref DmsEngineVersion
+      TimeoutInMinutes: 60
+
+
+  ApplicationSetupStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [ComputeStack, DatabaseStack]
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}application-setup.yaml'
+      Parameters:
+        StackPrefix: !Ref StackPrefix
+        SecurityGroupId: !GetAtt NetworkStack.Outputs.SecurityGroupId
+        UseCloudFront: !Ref UseCloudFront
+        EC2InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+        PublicDnsName: !GetAtt ComputeStack.Outputs.PublicDnsName   
+      TimeoutInMinutes: 20
+
+  # Creates the License Manager self-managed licence configuration that RDS for
+  # Db2 CE requires (BYOL). Gated on DeployDemo because only the demo Db2
+  # instance needs it. DemoInfraStack DependsOn this stack, so the configuration
+  # exists before RDS provisions Db2 - without it the instance cannot verify its
+  # licence, and AWS may terminate instances whose licence is unverifiable.
+  #
+  # Safe to run in a region that already has one: the custom resource adopts an
+  # existing db2-ce configuration rather than creating a duplicate, and on stack
+  # delete it removes only a configuration it created itself.
+  LicenseManagerStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployDemo
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}license-manager-stack.yaml'
+      Parameters:
+        StackPrefix: !Ref StackPrefix
+        LicenseConfigurationName: !Ref LicenseConfigurationName
+      TimeoutInMinutes: 10
+
+  SSMWaiterStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${TemplateS3Bucket}/${TemplateS3Prefix}ssm-waiter-stack.yaml'
+      Parameters:
+        StackPrefix: !Ref StackPrefix
+      TimeoutInMinutes: 5
+  
+
+  
+  ###############################################################################################
+  ### Database and Application Setup
+  ###############################################################################################
+  
+  RunEC2BaseSetup:
+    Type: Custom::SSMWaiter
+    DependsOn: [ComputeStack, SSMWaiterStack]
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ComputeStack.Outputs.SetupEC2BaseDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        AdminPassword: [!Ref AdminPassword]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 900
+
+  RunRepoDatabaseSetup:
+    Type: Custom::SSMWaiter
+    DependsOn: [DatabaseStack, RunEC2BaseSetup]
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt DatabaseStack.Outputs.SetupDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Timeout: 300
+
+  # The code checkout is staged here, ahead of BOTH downstream branches, so the
+  # application build and the demo schema deployment can each rely on
+  # /workshop/MMA-Test-Manager existing. The demo branch reads the committed Db2
+  # demo scripts and Db2ScriptRunner.java directly out of the checkout.
+  RunRepoDownload:
+    Type: Custom::SSMWaiter
+    DependsOn: RunRepoDatabaseSetup
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ApplicationSetupStack.Outputs.RepoDownloadDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        CodeURL: [!Ref CodeURL]
+        CodeBucket: [!Ref CodeBucket]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 600
+
+  RunDemoSetupEnvironment:
+    Type: Custom::SSMWaiter
+    Condition: DeployDemo
+    # EC2DemoPolicy carries the S3 read grant this step needs, so it must be
+    # attached to the instance role before the document runs.
+    DependsOn: [DemoInfraStack, RunRepoDownload, EC2DemoPolicy]
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt DemoInfraStack.Outputs.SetupEnvironmentDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        SQLScriptsURL: [!Ref DemoSQLScriptsURL]
+        ScriptsBucket: [!Ref DemoScriptsBucket]
+        ScriptsPrefix: [!Ref DemoScriptsPrefix]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 600
+
+  RunDemoDb2Schema:
+    Type: Custom::SSMWaiter
+    Condition: DeployDemo
+    DependsOn: RunDemoSetupEnvironment
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt DemoInfraStack.Outputs.DeployDb2SchemaDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        ScriptsBucket: [!Ref DemoScriptsBucket]
+        ScriptsPrefix: [!Ref DemoScriptsPrefix]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 600
+
+  RunDemoPostgresSchema:
+    Type: Custom::SSMWaiter
+    Condition: DeployDemo
+    DependsOn: RunDemoSetupEnvironment
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt DemoInfraStack.Outputs.DeployPostgresSchemaDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Timeout: 600
+
+  RunDMSSchemaConversion:
+    Type: Custom::SSMWaiter
+    Condition: DeployDemo
+    DependsOn: [RunDemoDb2Schema, RunDemoPostgresSchema]
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt DemoInfraStack.Outputs.DMSSchemaConversionDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Timeout: 900
+
+  RunDMSDataMigration:
+    Type: Custom::SSMWaiter
+    Condition: DeployDemo
+    DependsOn: RunDMSSchemaConversion
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt DemoInfraStack.Outputs.DMSDataMigrationDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Timeout: 900
+
+  RunApplicationDeployment:
+    Type: Custom::SSMWaiter
+    DependsOn: RunRepoDownload
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ApplicationSetupStack.Outputs.ApplicationDeploymentDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        CodeURL: [!Ref CodeURL]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 900
+
+  RunConfigureDemoInfraSecrets:
+    Type: Custom::SSMWaiter
+    Condition: DeployDemo
+    DependsOn: [RunApplicationDeployment, RunDMSDataMigration]
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ApplicationSetupStack.Outputs.ConfigureDemoInfraSecretsDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        RepoDBSecretArn: [!GetAtt DatabaseStack.Outputs.DBSecretArn]
+        AdminPassword: [!Ref AdminPassword]
+        VSCodeUser: [!Ref VSCodeUser]
+        DemoInfraStackName: [!GetAtt DemoInfraStack.Outputs.StackName]
+      Timeout: 300
+
+  RunApplicationPostDeploymentWithDemo:
+    Type: Custom::SSMWaiter
+    Condition: DeployDemo
+    DependsOn: RunConfigureDemoInfraSecrets
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ApplicationSetupStack.Outputs.ApplicationPostDeploymentDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        UseCloudFront: [!If [UseCloudFront, 'true', 'false']]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 300
+
+  RunConfigureManualInfraSecrets:
+    Type: Custom::SSMWaiter
+    Condition: NoDemo
+    DependsOn: RunApplicationDeployment
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ApplicationSetupStack.Outputs.ConfigureManualInfraSecretsDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        RepoDBSecretArn: [!GetAtt DatabaseStack.Outputs.DBSecretArn]
+        AdminPassword: [!Ref AdminPassword]
+        VSCodeUser: [!Ref VSCodeUser]
+        Db2SecretArn: [!Ref Db2SecretArn]
+        PostgresSecretArn: [!Ref PostgresSecretArn]
+        Db2TestSecretArn: [!Ref Db2TestSecretArn]
+        PostgresTestSecretArn: [!Ref PostgresTestSecretArn]
+        S3DMSProjectPath: [!Ref S3DMSProjectPath]
+      Timeout: 300
+
+  RunApplicationPostDeploymentWithManual:
+    Type: Custom::SSMWaiter
+    Condition: NoDemo
+    DependsOn: RunConfigureManualInfraSecrets
+    Properties:
+      ServiceToken: !GetAtt SSMWaiterStack.Outputs.SSMWaiterFunctionArn
+      DocumentName: !GetAtt ApplicationSetupStack.Outputs.ApplicationPostDeploymentDocumentName
+      InstanceId: !GetAtt ComputeStack.Outputs.InstanceId
+      Parameters:
+        UseCloudFront: [!If [UseCloudFront, 'true', 'false']]
+        VSCodeUser: [!Ref VSCodeUser]
+      Timeout: 300
+
+Outputs:
+  InstanceId:
+    Value: !GetAtt ComputeStack.Outputs.InstanceId
+  
+  PrivateIP:
+    Value: !GetAtt ComputeStack.Outputs.PrivateIp
+  
+  PublicIP:
+    Condition: UseNginx
+    Value: !GetAtt ComputeStack.Outputs.PublicIp
+  
+  TestManagerURL:
+    Condition: UseNginx
+    Value: !Sub 'https://${ComputeStack.Outputs.PublicIp}'
+    Description: Test Manager login with admin/AdminPassword
+  
+  CodeServerURL:
+    Condition: UseNginx
+    Value: !Sub 'https://${ComputeStack.Outputs.PublicIp}/code/?folder=/workshop/MMA-Test-Manager'
+    Description: VS Code login with AdminPassword
+
+  CloudFrontTestManagerURL:
+    Condition: UseCloudFront
+    Value: !Sub 'https://${ApplicationSetupStack.Outputs.CloudFrontDistributionDomain}'
+    Description: Test Manager via CloudFront - login with admin/AdminPassword
+  
+  CloudFrontCodeServerURL:
+    Condition: UseCloudFront
+    Value: !Sub 'https://${ApplicationSetupStack.Outputs.CloudFrontDistributionDomain}/code/?folder=/workshop/MMA-Test-Manager'
+    Description: VS Code via CloudFront - login with AdminPassword
+  
+  RepoDBEndpoint:
+    Value: !GetAtt DatabaseStack.Outputs.DBEndpoint
+  
+  DemoDb2Endpoint:
+    Condition: DeployDemo
+    Description: Db2 source endpoint for demo
+    Value: !GetAtt DemoInfraStack.Outputs.Db2Endpoint
+  
+  DemoPostgresEndpoint:
+    Condition: DeployDemo
+    Description: Aurora PostgreSQL endpoint for demo
+    Value: !GetAtt DemoInfraStack.Outputs.PostgresEndpoint
+  
+  Db2AdminSecretArn:
+    Condition: DeployDemo
+    Description: Db2 admin credentials secret ARN
+    Value: !GetAtt DemoInfraStack.Outputs.Db2AdminSecretArn
+  
+  PostgresAdminSecretArn:
+    Condition: DeployDemo
+    Description: PostgreSQL admin credentials secret ARN
+    Value: !GetAtt DemoInfraStack.Outputs.PostgresAdminSecretArn
+
+  Db2TestUserSecretArn:
+    Condition: DeployDemo
+    Description: Db2 test credentials secret ARN
+    Value: !GetAtt DemoInfraStack.Outputs.Db2TestUserSecretArn
+  
+  PostgresTestUserSecretArn:
+    Condition: DeployDemo
+    Description: PostgreSQL test credentials secret ARN
+    Value: !GetAtt DemoInfraStack.Outputs.PostgresTestUserSecretArn
+
+  Db2LicenseConfigurationArn:
+    Condition: DeployDemo
+    Description: License Manager db2-ce licence configuration used by the Db2 instance
+    Value: !GetAtt LicenseManagerStack.Outputs.LicenseConfigurationArn
+
+  Db2LicenseConfigurationCreated:
+    Condition: DeployDemo
+    Description: >-
+      'true' if this stack created the licence configuration, 'false' if it
+      adopted one that already existed in the region (and will leave it in place
+      on delete).
+    Value: !GetAtt LicenseManagerStack.Outputs.LicenseConfigurationCreated

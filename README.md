@@ -54,7 +54,10 @@ One-click deployment solutions for different migration scenarios:
 **one-click-deployment/db2-to-postgres/** ⚠️ *work in progress*
 - Main stack: `mma-apps-main-stack.yaml`
 - Nested stacks: `mma-nested-stacks/` (network, compute, database, demo-infrastructure, application-setup)
-- Deployment scripts: `deploy-with-demo-infra.sh`, `deploy-with-demo-infra_cloudfront.sh`, `deploy-with-demo-infra_cloudfront.sh`
+- Deployment scripts: `deploy-with-demo-infra.sh`, `deploy-with-demo-infra_cloudfront.sh`
+- **Not deployable as-is.** The Db2 source engine (RDS for Db2 vs Db2 LUW on EC2) is undecided and engine-specific values are unverified. See [one-click-deployment/db2-to-postgres/README.md](one-click-deployment/db2-to-postgres/README.md) for the outstanding checklist, or run `grep -rn PLACEHOLDER one-click-deployment/db2-to-postgres/`.
+
+Note: there is no one-click deployment for the Sybase track, and `sybase-client-mcp` is intentionally excluded from `build-all.sh` because its jConnect driver (`com.sybase:jconn42`) is licensed SAP software that is not on Maven Central and must be installed manually. See [sybase-client-mcp/README.md](sybase-client-mcp/README.md).
 
 ## Quick Start
 

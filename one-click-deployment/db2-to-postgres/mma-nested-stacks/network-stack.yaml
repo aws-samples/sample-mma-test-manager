@@ -1,0 +1,183 @@
+Description: Network infrastructure for MMA applications
+
+# SINGLE SECURITY GROUP FOR THE WHOLE DEPLOYMENT
+# ------------------------------------------------------------------------------
+# There used to be three security groups, one per nested stack:
+#
+#   network-stack        ${StackPrefix}-mma-apps-sg    EC2 instance
+#   database-stack       ${StackPrefix}-testmgr-db-sg  repo Aurora cluster
+#   demo-infrastructure  ${StackPrefix}-demo-db-sg     demo Db2 + Aurora + DMS
+#
+# The two database groups each carried rules referencing the EC2 group
+# (SourceSecurityGroupId), and application-setup added a rule to the EC2 group it
+# did not own. A security group cannot be deleted while another group's rule
+# references it, and the three groups lived in three stacks deleted in different
+# orders - so teardown deadlocked with:
+#
+#   resource sg-... has a dependent object
+#
+# One group removes the problem by construction: there are no inter-group
+# references left to order, and the group is created and deleted by exactly one
+# stack. Everything that needs to talk to everything else is in the same group,
+# so a single self-referencing rule per port replaces the cross-group rules.
+#
+# TRADE-OFF, deliberate and worth stating: this is flatter than before. The EC2
+# instance, the Test Manager repository database, the demo Db2 source, the demo
+# Aurora target and the DMS replication instance now share one group, so the
+# previous "EC2 may reach the databases but not the reverse" boundary is gone,
+# as is the repo-versus-demo separation. For a disposable workshop environment in
+# private subnets that is an acceptable trade for a teardown that works. It is
+# NOT what you would do for a long-lived or shared environment.
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC ID
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet ID
+
+  StackPrefix:
+    Type: String
+    Description: Unique prefix for resources
+
+  UseCloudFront:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether the Test Manager is fronted by CloudFront. When true, port 80 is
+      opened to the CloudFront managed prefix list. This rule used to live in
+      application-setup.yaml, which modified a group owned by this stack - one of
+      the cross-stack references that made teardown deadlock.
+
+Conditions:
+  UseCloudFrontDistribution: !Equals [!Ref UseCloudFront, 'true']
+
+Mappings:
+  # CloudFront origin-facing managed prefix list, per region. Copied from
+  # application-setup.yaml along with the ingress rule that uses it.
+  AWSRegionsPrefixListID:
+    us-east-1:
+      PrefixList: pl-3b927c52
+    us-east-2:
+      PrefixList: pl-b6a144df
+    us-west-1:
+      PrefixList: pl-4ea04527
+    us-west-2:
+      PrefixList: pl-82a045eb
+    ap-northeast-1:
+      PrefixList: pl-58a04531
+    ap-northeast-2:
+      PrefixList: pl-22a6434b
+    ap-southeast-1:
+      PrefixList: pl-31a34658
+    ap-southeast-2:
+      PrefixList: pl-b8a742d1
+    ap-south-1:
+      PrefixList: pl-9aa247f3
+    ca-central-1:
+      PrefixList: pl-38a64351
+    eu-central-1:
+      PrefixList: pl-a3a144ca
+    eu-west-1:
+      PrefixList: pl-4fa04526
+    eu-west-2:
+      PrefixList: pl-93a247fa
+    eu-west-3:
+      PrefixList: pl-75b1541c
+    eu-north-1:
+      PrefixList: pl-fab65393
+    sa-east-1:
+      PrefixList: pl-5da64334
+
+Resources:
+  # The one group. Named -mma-apps-sg for continuity with the EC2 group it
+  # replaces, since that is the name the deploy scripts and docs already use.
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F1000
+            reason: "All outbound traffic should be allowed from this instance."
+    Properties:
+      GroupDescription: Security group for MMA applications (EC2, repo DB, demo Db2/Aurora, DMS)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # --- EC2 / web access. 127.0.0.1/32 is a deliberate placeholder: the
+        # workshop instructs participants to widen it to their own IP.
+        - Description: Allow HTTPS from anywhere - modify source IP to your IP address
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 127.0.0.1/32
+        - Description: Allow HTTP from anywhere - modify source IP to your IP address
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 127.0.0.1/32
+        - Description: Allow MMA Test Manager - modify source IP to your IP address
+          IpProtocol: tcp
+          FromPort: 8082
+          ToPort: 8082
+          CidrIp: 127.0.0.1/32
+        - Description: Allow Code Server - modify source IP to your IP address
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 127.0.0.1/32
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-mma-apps-sg'
+
+  # --- Database ports, self-referencing ---------------------------------------
+  # NOTE ON DESCRIPTIONS: EC2 restricts security group rule descriptions to
+  # a-zA-Z0-9 and the set  . _-:/()#,@[]+=&;{}!$*  plus spaces. An arrow like
+  # '->' is REJECTED with "Invalid rule description", so these say "to" instead.
+  # These replace the cross-group rules the DB stacks used to declare. Because
+  # every member (EC2, repo Aurora, demo Db2, demo Aurora, DMS) is in this group,
+  # a self-reference covers EC2 -> DB, DMS -> DB, and DB -> DB.
+  #
+  # Declared as separate AWS::EC2::SecurityGroupIngress resources rather than
+  # inline SecurityGroupIngress entries: a group cannot reference its own id
+  # inline (it does not exist yet at that point in the template).
+  IngressPostgresSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref SecurityGroup
+      Description: PostgreSQL within the group (EC2 and DMS to Aurora, repo and demo)
+
+  IngressDb2Self:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 50000
+      ToPort: 50000
+      SourceSecurityGroupId: !Ref SecurityGroup
+      Description: Db2 within the group (EC2 and DMS to Db2 source)
+
+  # CloudFront origin access. Moved here from application-setup.yaml so that
+  # every rule on this group is owned by the stack that owns the group.
+  IngressCloudFront:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseCloudFrontDistribution
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourcePrefixListId: !FindInMap [AWSRegionsPrefixListID, !Ref 'AWS::Region', PrefixList]
+      Description: Allow HTTP from CloudFront
+
+Outputs:
+  SecurityGroupId:
+    Description: The single security group used by every resource in this deployment
+    Value: !Ref SecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroupId'
