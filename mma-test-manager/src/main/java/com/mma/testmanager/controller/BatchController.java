@@ -172,6 +172,7 @@ public class BatchController {
             case "postgres", "postgresql" -> "PostgreSQL";
             case "sqlserver" -> "SQL Server";
             case "sybase" -> "Sybase ASE";
+            case "db2" -> "Db2 LUW";
             case "mysql" -> "MySQL";
             default -> engine.toUpperCase();
         };

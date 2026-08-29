@@ -1,0 +1,276 @@
+Description: Lambda function for SSM command execution waiter
+
+Parameters:
+  StackPrefix:
+    Type: String
+
+Resources:
+  SSMWaiterRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "Wildcard resource required for SSM GetCommandInvocation and ListCommandInvocations - these actions do not support resource-level permissions per AWS SSM API documentation"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                  # Used to wait for the instance to register as an SSM managed
+                  # instance before sending a command. Without this the waiter
+                  # cannot distinguish "still booting" from "misconfigured".
+                  - ssm:DescribeInstanceInformation
+                Resource: '*'
+
+  SSMWaiterFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "CloudFormation custom resource function only calls AWS SSM API, does not require VPC access"
+          - id: W92
+            reason: "CloudFormation custom resource with low invocation frequency, reserved concurrency not required"
+      checkov:
+        skip:
+          - id: CKV_AWS_116
+            comment: "DLQ not required for CloudFormation custom resource"
+          - id: CKV_AWS_117
+            comment: "Lambda only calls AWS APIs, no VPC access required"
+    Properties:
+      FunctionName: !Sub '${StackPrefix}-ssm-waiter'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt SSMWaiterRole.Arn
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+          from datetime import datetime
+          from botocore.exceptions import ClientError
+          
+          ssm = boto3.client('ssm')
+          
+          def handler(event, context):
+              start_time = datetime.utcnow()
+              try:
+                  request_type = event['RequestType']
+                  
+                  if request_type == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  
+                  if request_type in ['Create', 'Update']:
+                      props = event['ResourceProperties']
+                      document_name = props['DocumentName']
+                      instance_id = props['InstanceId']
+                      parameters = props.get('Parameters', {})
+                      timeout = int(props.get('Timeout', 600))
+                      
+                      print(f"=== Lambda Invocation Start ===")
+                      print(f"Timestamp: {start_time.isoformat()}Z")
+                      print(f"Document: {document_name}")
+                      print(f"InstanceId: {instance_id}")
+                      print(f"Timeout: {timeout}s")
+                      print(f"Parameters: {list(parameters.keys())}")
+                      
+                      # ---------------------------------------------------------
+                      # Wait for the instance to register as an SSM managed
+                      # instance before sending anything.
+                      # ---------------------------------------------------------
+                      # A fresh instance is not immediately usable by SendCommand:
+                      # the SSM agent has to start and register, and this stack's
+                      # UserData runs `yum update -y` first, which on AL2023 can
+                      # take 5-10 minutes. The previous logic retried SendCommand
+                      # 5 times at 60s intervals and gave up after 4 minutes,
+                      # which failed the stack on a slow boot with
+                      # "InvalidInstanceId: Instances not in a valid state".
+                      #
+                      # Two changes: poll describe_instance_information (cheaper
+                      # and more informative than provoking SendCommand errors),
+                      # and budget the wait against the LAMBDA clock rather than a
+                      # fixed retry count. The Lambda hard-stops at 900s - the AWS
+                      # maximum - so an unbounded wait would be killed mid-flight
+                      # with no cfnresponse sent, leaving the stack hanging until
+                      # its own timeout.
+                      #
+                      # RESERVE_MS keeps enough headroom to send a FAILED response
+                      # if we run out of time, so the stack fails fast instead of
+                      # waiting an hour for CloudFormation to give up.
+                      RESERVE_MS = 60_000
+                      REGISTRATION_POLL_INTERVAL = 15
+
+                      def remaining_ms():
+                          try:
+                              return context.get_remaining_time_in_millis()
+                          except Exception:
+                              return RESERVE_MS + 1
+
+                      registered = False
+                      reg_start = time.time()
+                      while remaining_ms() > RESERVE_MS:
+                          try:
+                              info = ssm.describe_instance_information(
+                                  Filters=[{'Key': 'InstanceIds', 'Values': [instance_id]}]
+                              )
+                              entries = info.get('InstanceInformationList', [])
+                              if entries:
+                                  ping = entries[0].get('PingStatus')
+                                  if ping == 'Online':
+                                      waited = int(time.time() - reg_start)
+                                      print(f"Instance registered with SSM after {waited}s (PingStatus=Online)")
+                                      registered = True
+                                      break
+                                  print(f"Instance known to SSM but PingStatus={ping}; waiting...")
+                              else:
+                                  print(f"Instance not yet registered with SSM; "
+                                        f"waited {int(time.time() - reg_start)}s, "
+                                        f"{int(remaining_ms() / 1000)}s of Lambda budget left")
+                          except ClientError as e:
+                              # Transient describe failures should not abort the wait.
+                              print(f"describe_instance_information failed ({e}); continuing to wait")
+                          time.sleep(REGISTRATION_POLL_INTERVAL)
+
+                      if not registered:
+                          raise Exception(
+                              f"Instance {instance_id} did not register with SSM within "
+                              f"{int(time.time() - reg_start)}s. Check that the instance has "
+                              f"outbound HTTPS to ssm/ssmmessages/ec2messages (IGW route, NAT, "
+                              f"or VPC endpoints) and that its instance profile includes "
+                              f"AmazonSSMManagedInstanceCore. UserData running 'yum update -y' "
+                              f"can delay agent registration by several minutes."
+                          )
+
+                      # Send the command. The registration wait above means
+                      # InvalidInstanceId should no longer occur, but retry a few
+                      # times anyway: registration and command-eligibility are not
+                      # perfectly simultaneous.
+                      command_id = None
+                      cmd_start = datetime.utcnow()
+                      send_attempt = 0
+                      while remaining_ms() > RESERVE_MS:
+                          send_attempt += 1
+                          try:
+                              response = ssm.send_command(
+                                  InstanceIds=[instance_id],
+                                  DocumentName=document_name,
+                                  Parameters=parameters,
+                                  TimeoutSeconds=timeout
+                              )
+                              command_id = response['Command']['CommandId']
+                              print(f"SSM command sent: {command_id}")
+                              break
+                          except ClientError as e:
+                              if e.response['Error']['Code'] == 'InvalidInstanceId':
+                                  print(f"InvalidInstanceId on send attempt {send_attempt}; "
+                                        f"retrying in 15s")
+                                  time.sleep(15)
+                              else:
+                                  raise
+                      if command_id is None:
+                          raise Exception(
+                              f"Could not send SSM command to {instance_id} after "
+                              f"{send_attempt} attempt(s) within the Lambda time budget."
+                          )
+                      
+                      # Wait for completion. The poll budget is whatever Lambda
+                      # time is left, minus the reserve - NOT the full `timeout`.
+                      # Registration may already have consumed several minutes, and
+                      # retry + poll must together fit inside the Lambda's 900s
+                      # ceiling or the function is killed without responding.
+                      poll_budget = max(0, int(remaining_ms() / 1000) - int(RESERVE_MS / 1000))
+                      poll_budget = min(timeout, poll_budget)
+                      print(f"Polling for command completion, budget {poll_budget}s")
+                      poll_start = time.time()
+                      while time.time() - poll_start < poll_budget:
+                          try:
+                              invocation = ssm.get_command_invocation(
+                                  CommandId=command_id,
+                                  InstanceId=instance_id
+                              )
+                              
+                              status = invocation['Status']
+                              
+                              if status == 'Success':
+                                  end_time = datetime.utcnow()
+                                  duration = (end_time - start_time).total_seconds()
+                                  print(f"=== Lambda Invocation Complete ===")
+                                  print(f"Document: {document_name}")
+                                  print(f"InstanceId: {instance_id}")
+                                  print(f"End Time: {end_time.isoformat()}Z")
+                                  print(f"Duration: {duration:.2f}s")
+                                  print(f"Status: SUCCESS")
+                                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                                      'CommandId': command_id,
+                                      'Status': status
+                                  })
+                                  return
+                              elif status in ['Failed', 'Cancelled', 'TimedOut']:
+                                  end_time = datetime.utcnow()
+                                  duration = (end_time - start_time).total_seconds()
+                                  error_msg = invocation.get('StandardErrorContent', 'Command failed')
+                                  print(f"=== Lambda Invocation Failed ===")
+                                  print(f"Document: {document_name}")
+                                  print(f"InstanceId: {instance_id}")
+                                  print(f"End Time: {end_time.isoformat()}Z")
+                                  print(f"Duration: {duration:.2f}s")
+                                  print(f"Status: {status}")
+                                  print(f"Error: {error_msg}")
+                                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                                      'CommandId': command_id,
+                                      'Status': status,
+                                      'Error': error_msg
+                                  })
+                                  return
+                              
+                              time.sleep(10)
+                          except ssm.exceptions.InvocationDoesNotExist:
+                              time.sleep(5)
+                      
+                      # Timeout
+                      end_time = datetime.utcnow()
+                      duration = (end_time - start_time).total_seconds()
+                      print(f"=== Lambda Invocation Timeout ===")
+                      print(f"Document: {document_name}")
+                      print(f"InstanceId: {instance_id}")
+                      print(f"End Time: {end_time.isoformat()}Z")
+                      print(f"Duration: {duration:.2f}s")
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {
+                          'CommandId': command_id,
+                          'Error': 'Timeout waiting for command completion'
+                      })
+                      
+              except Exception as e:
+                  end_time = datetime.utcnow()
+                  duration = (end_time - start_time).total_seconds()
+                  print(f"=== Lambda Invocation Error ===")
+                  print(f"End Time: {end_time.isoformat()}Z")
+                  print(f"Duration: {duration:.2f}s")
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Error': str(e)
+                  })
+
+Outputs:
+  SSMWaiterFunctionArn:
+    Value: !GetAtt SSMWaiterFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SSMWaiterFunctionArn'

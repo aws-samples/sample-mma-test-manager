@@ -1,0 +1,1775 @@
+Description: Demo infrastructure - Db2 source, Aurora PostgreSQL, and DMS for migration testing
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least 2 subnets in different AZs
+  
+  EC2SecurityGroupId:
+    Type: String
+
+  StackPrefix:
+    Type: String
+  
+  DemoSQLScriptsURL:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional HTTPS URL to a SQL scripts zip. Empty (the default) means use the
+      demo scripts staged in S3 by the deploy script, falling back to the repo
+      checkout under one-click-deployment/db2-to-postgres/demo-scripts/.
+
+  # Bucket holding the demo SQL scripts, uploaded by deploy-with-demo-infra.sh
+  # before create-stack. Preferred over the repo checkout because CodeURL may
+  # point at a published code archive that predates the Db2 track and therefore
+  # contains no demo-scripts/ directory - the original cause of
+  # RunDemoSetupEnvironment failing. Empty falls back to the checkout.
+  DemoScriptsBucket:
+    Type: String
+    Default: ''
+    Description: >-
+      S3 bucket containing the Db2 demo SQL scripts. Empty means read them from
+      the repo checkout on the instance instead.
+
+  DemoScriptsPrefix:
+    Type: String
+    Default: 'demo-scripts/'
+    Description: Key prefix for the demo SQL scripts within DemoScriptsBucket.
+
+  KmsKeyId:
+    Type: String
+    Description: KMS CMK ARN for Secrets Manager encryption
+
+  KmsKeyArn:
+    Type: String
+    Description: KMS CMK ARN for IAM policy grants
+
+  # IBM Db2 licence identifiers. RDS for Db2 CE is bring-your-own-licence and
+  # AWS validates these against IBM. They default to empty so the gap is
+  # obvious; the parent stack has a Rule that rejects the deployment at
+  # validation time if either is empty while DeployDemoInfra=true, so an empty
+  # value should never reach the Db2 instance here. The CE licence is free;
+  # registration yields both IDs:
+  #   https://www.ibm.com/account/reg/us-en/signup?formid=urx-54367
+  Db2CustomerId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^[0-9]*$'
+    ConstraintDescription: IBM Customer ID must be numeric.
+    Description: >-
+      IBM customer ID for RDS for Db2 licensing. Required for Db2 Community
+      Edition (db2-ce), which is BYOL-only. The CE licence is free but you must
+      register with IBM to obtain this ID. Passed down from the parent stack;
+      the parent enforces non-empty via a template Rule when
+      DeployDemoInfra=true.
+    NoEcho: true
+
+  Db2SiteId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^[0-9]*$'
+    ConstraintDescription: IBM Site ID must be numeric.
+    Description: >-
+      IBM site ID for RDS for Db2 licensing. Required for Db2 Community
+      Edition (db2-ce). Free to obtain by registering with IBM.
+    NoEcho: true
+
+  # Engine values below are taken from rds-db2-ce.yaml, a template that has
+  # been applied against a real account. Overridable so the deploy script can
+  # substitute a value it discovered from describe-db-engine-versions /
+  # describe-orderable-db-instance-options in the target region.
+  Db2EngineVersion:
+    Type: String
+    Default: 12.1.4.0.sb00085812.r1
+    Description: >-
+      RDS for Db2 CE engine version. CE ships as 12.1 only, but RDS requires
+      the fully-qualified build string rather than the bare major.minor.
+      Confirm with: aws rds describe-db-engine-versions --engine db2-ce
+
+  Db2InstanceClass:
+    Type: String
+    Default: db.m7i.large
+    AllowedValues:
+      - db.m7i.large
+      - db.t3.small
+    Description: >-
+      RDS instance class for Db2 CE. db.m7i.large is confirmed available for
+      this configuration; db.t3.small is the known fallback.
+
+  EnableDeletionProtection:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Deletion protection on the demo Db2 and Aurora databases. Defaults to
+      false so a workshop stack can be torn down with a single delete-stack.
+      These are disposable migration source/target instances that the stack
+      rebuilds, so protection mainly gets in the way here.
+
+  DmsEngineVersion:
+    Type: String
+    Default: 3.6.1
+    Description: >-
+      DMS replication instance engine version. Pinned so the version cannot
+      drift between deployments - Db2 LUW source support varies by DMS version.
+      Confirm availability with:
+      aws dms describe-orderable-replication-instances
+      --query 'OrderableReplicationInstances[].EngineVersion'
+
+Conditions:
+  # DemoSQLScriptsURL is now optional: empty means "use the demo scripts
+  # committed in the repo". CloudFormation rejects an Output whose exported
+  # Value is empty, so the SQLScriptsURL output below is conditional on the
+  # parameter actually having a value.
+  HasSQLScriptsURL: !Not [!Equals [!Ref DemoSQLScriptsURL, '']]
+
+  # Deletion protection on the two demo databases. Default false: these are
+  # disposable migration-source/target instances rebuilt by the stack, so a
+  # workshop teardown should not need manual RDS calls first.
+  ProtectDemoDatabases: !Equals [!Ref EnableDeletionProtection, 'true']
+
+Resources:
+  ###############################################################################################
+  ### Secrets
+  ###############################################################################################
+  
+  DemoDb2AdminUserSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${StackPrefix}-demo-secret-db2-admin'
+      KmsKeyId: !Ref KmsKeyId
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "db2inst1", "engine": "db2", "port": 50000, "dbname": "BOBSDB"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '|\.+%"@/\\&<>;,[]{}()#?*=!''`:$~ '
+        ExcludePunctuation: false
+        RequireEachIncludedType: true
+  
+  DemoPostgresAdminUserSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${StackPrefix}-demo-secret-postgres-admin'
+      KmsKeyId: !Ref KmsKeyId
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "postgres", "engine": "postgres", "port": 5432, "dbname": "demodb"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '|\.+%"@/\\&<>;,[]{}()#?*=!''`:$~ '
+        ExcludePunctuation: false
+        RequireEachIncludedType: true
+
+  DemoDb2TestUserSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${StackPrefix}-demo-db2-ro-user'
+      KmsKeyId: !Ref KmsKeyId
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "db2_ro_user", "port": 50000, "dbname": "BOBSDB"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '|\.+%"@/\\&<>;,[]{}()#?*=!''`:$~ '
+        ExcludePunctuation: false
+        RequireEachIncludedType: true
+  
+  DemoPostgresTestUserSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${StackPrefix}-demo-postgres-ro-user'
+      KmsKeyId: !Ref KmsKeyId
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "postgres_ro_user", "port": 5432, "dbname": "demodb"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '|\.+%"@/\\&<>;,[]{}()#?*=!''`:$~ '
+        ExcludePunctuation: false
+        RequireEachIncludedType: true
+
+  # Secrets will be updated with host information by SSM documents
+  
+  ###############################################################################################
+  ### Security Groups
+  ###############################################################################################
+  
+  # The former ${StackPrefix}-demo-db-sg was merged into the single group in
+  # network-stack.yaml. It carried rules referencing the EC2 group plus four
+  # self-referencing ingress/egress rules; those cross-stack references are what
+  # deadlocked stack deletion ("resource sg-... has a dependent object"). The
+  # demo Db2 instance, the demo Aurora cluster and the DMS replication instance
+  # now all attach to the shared group, which permits 50000 and 5432 from within
+  # itself - covering EC2 -> DB, DMS -> DB and DB -> DB.
+
+  ###############################################################################################
+  ### Db2 Source
+  ###############################################################################################
+  
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub '${StackPrefix}-demo-db-subnet-group'
+      DBSubnetGroupDescription: Db2/AuroraPG subnet group
+      SubnetIds: !Ref SubnetIds
+  
+  DBMonitorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: !Sub ${StackPrefix}-demo-rdsmonitoring
+      Description: Provides access to Cloudwatch for RDS Enhanced Monitoring
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      AssumeRolePolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+
+  # =============================================================================
+  # Db2 source database - RDS for Db2 Community Edition (db2-ce)
+  # -----------------------------------------------------------------------------
+  # CE was chosen for the workshop: the licence is free from IBM, so
+  # participants pay only for RDS infrastructure. Note that CE is BYOL-only
+  # (Marketplace licensing is not offered for db2-ce), so the IBM Customer ID
+  # and Site ID are still required via Db2ParameterGroup below - registration
+  # is free at https://www.ibm.com/account/reg/us-en/signup?formid=urx-54367
+  #
+  # NOTE: if you already have your own RDS for Db2 CloudFormation template,
+  # replace this resource with a nested stack reference and keep the outputs
+  # (Db2Endpoint, Db2AdminSecretArn, Db2TestUserSecretArn) so that
+  # application-setup.yaml still wires the MCP server configuration correctly.
+  #
+  # STILL VERIFY: EngineVersion and DBInstanceClass are unconfirmed for this
+  # engine and region. Check with:
+  #   aws rds describe-db-engine-versions --engine db2-ce \
+  #     --query 'DBEngineVersions[].[EngineVersion,DBParameterGroupFamily]'
+  #   aws rds describe-orderable-db-instance-options --engine db2-ce \
+  #     --engine-version <version> --query 'OrderableDBInstanceOptions[].DBInstanceClass'
+  # =============================================================================
+  Db2DB:
+    #checkov:skip=CKV_AWS_157:Multi-AZ not required for demo environment
+    #checkov:skip=CKV_AWS_118:Enhanced monitoring not required for demo environment
+    Type: AWS::RDS::DBInstance
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Explicit name required for demo environment identification and cross-stack references"
+    # Skip the final snapshot on delete, as AuroraCluster below. The Db2 source
+    # schema is created from scratch by the demo deployment (the numbered
+    # scripts in demo-scripts/ run via RunDemoDb2Schema), so a snapshot would
+    # only capture regenerable demo data while adding minutes to every teardown
+    # and leaving a billed manual snapshot behind.
+    #
+    # Trade-off to be aware of: this instance takes 15-25 minutes to provision,
+    # so there is no fast restore path once it is gone - a redeploy pays the
+    # full creation time plus the schema load. That is the accepted cost here.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub '${StackPrefix}-demo-db2-source'
+      # Community Edition. CE is available in 12.1 only, but RDS requires the
+      # fully-qualified build string here, not the bare major.minor.
+      Engine: db2-ce
+      EngineVersion: !Ref Db2EngineVersion
+      LicenseModel: bring-your-own-license
+      DBInstanceClass: !Ref Db2InstanceClass
+      # Db2 database names are max 8 chars, uppercase by convention. BOBSDB is
+      # the database the demo schema scripts expect (they CONNECT TO BOBSDB and
+      # create SCHEMA DEMO inside it).
+      #
+      # RDS creates this database during provisioning, so there is no
+      # CREATE DATABASE / rdsadmin.create_database call anywhere in this stack.
+      # One consequence: the database's default page size is whatever RDS
+      # chooses, and cannot be set here. The setup script therefore passes the
+      # page size explicitly to rdsadmin.create_bufferpool and
+      # rdsadmin.create_tablespace rather than relying on the database default.
+      DBName: BOBSDB
+      # Carries rds.ibm_customer_id / rds.ibm_site_id for the IBM licence
+      # check. Creation fails without it.
+      DBParameterGroupName: !Ref Db2ParameterGroup
+      AllocatedStorage: 50
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DemoDb2AdminUserSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DemoDb2AdminUserSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref EC2SecurityGroupId
+      # RDS for Db2 listens on 50000. Stated explicitly so it matches the
+      # security group rules and the port recorded in the demo secrets.
+      Port: 50000
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 1
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt DBMonitorRole.Arn
+      # Db2 log file names, per rds-db2-ce.yaml. The Oracle track exported
+      # 'alert'/'trace'; Db2 uses these two, and RDS expects the .log suffix.
+      EnableCloudwatchLogsExports:
+        - diag.log
+        - notify.log
+      DeletionProtection: !If [ProtectDemoDatabases, true, false]
+      AutoMinorVersionUpgrade: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-demo-db2-source'
+        - Key: EngineEdition
+          Value: Db2 Community Edition
+
+  # IBM licence parameter group. Db2 CE (db2-ce) is BYOL-only - Marketplace
+  # licensing is NOT available for Community Edition - but the CE licence itself
+  # is free from IBM. You still must register to obtain the two IDs:
+  #   https://www.ibm.com/account/reg/us-en/signup?formid=urx-54367
+  # The instance will fail to create if these are left empty, and AWS may
+  # terminate instances whose licence cannot be verified.
+  # Docs: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/db2-licensing.html
+  Db2ParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub '${StackPrefix} Db2 CE BYOL licence parameters'
+      # Must match Engine + major version. Valid families: db2-se-11.5,
+      # db2-ae-11.5, db2-ae-12.1, db2-ce-12.1, db2-se-12.1.
+      # CE is 12.1 only.
+      Family: db2-ce-12.1
+      Parameters:
+        rds.ibm_customer_id: !Ref Db2CustomerId
+        rds.ibm_site_id: !Ref Db2SiteId
+        # Required for DMS Schema Conversion to connect to this instance.
+        #
+        # RDS for Db2 defaults to authentication=SERVER_ENCRYPT (not modifiable)
+        # with db2auth=JCC_ENFORCE_SECMEC, which requires the client to encrypt
+        # the password at the DRDA layer. DMS Schema Conversion bundles IBM JCC
+        # 4.25.13, which cannot do that against this server: it fails with
+        #   ERRORCODE=-4214, SQLSTATE=28000, "Security mechanism not supported"
+        #   caused by InvalidAlgorithmParameterException in EncryptionManager
+        # and DMS surfaces it only as "an internal error, try again later".
+        #
+        # CLEAR_TEXT relaxes the enforced mechanism so that driver can
+        # authenticate. A current driver does not need this - Db2ScriptRunner
+        # uses JCC 4.33.31 and connects fine either way - so this exists purely
+        # to accommodate the version DMS ships.
+        #
+        # SECURITY TRADEOFF: passwords are then sent unencrypted at the DRDA
+        # layer. Acceptable here because the instance is PubliclyAccessible:
+        # false in a private subnet, reachable only from the workshop VPC, and
+        # holds regenerable demo data. Do NOT carry this to an instance holding
+        # real data; use a client with a modern JCC driver instead, or terminate
+        # TLS by setting SslMode on the connection.
+        db2auth: CLEAR_TEXT
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-demo-db2-params'
+  
+  ###############################################################################################
+  ### Aurora PostgreSQL (Target)
+  ###############################################################################################
+    
+  AuroraCluster:
+    #checkov:skip=CKV_AWS_162:IAM authentication not required for demo environment
+    Type: AWS::RDS::DBCluster
+    # Skip the final snapshot on delete. CloudFormation's DEFAULT for
+    # AWS::RDS::DBCluster is Snapshot, which makes teardown of this demo stack
+    # take 5-15 minutes and leaves a billed manual snapshot behind after the
+    # stack is gone - they accumulate silently across deploy/teardown cycles.
+    #
+    # Safe here because this cluster holds only the regenerable DMS target
+    # schema: it is populated from the Db2 source by the demo deployment, so
+    # there is nothing to recover that a redeploy would not recreate. Matches
+    # DmsS3Bucket below, which is Delete for the same reason.
+    #
+    # Do NOT copy this to database-stack.yaml - that cluster holds the Test
+    # Manager's own repository state, which is not regenerable.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBClusterIdentifier: !Sub '${StackPrefix}-demo-aurora-pg-cluster'
+      Engine: aurora-postgresql
+      EngineVersion: '17.7'
+      DatabaseName: demodb
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DemoPostgresAdminUserSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DemoPostgresAdminUserSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref EC2SecurityGroupId
+      ServerlessV2ScalingConfiguration:
+        MaxCapacity: 16
+        MinCapacity: 1
+      Port: 5432
+      PerformanceInsightsEnabled: true
+      PerformanceInsightsRetentionPeriod: 465
+      DatabaseInsightsMode: advanced
+      EnableCloudwatchLogsExports:
+        - postgresql
+      BackupRetentionPeriod: 7
+      StorageEncrypted: true
+      DeletionProtection: !If [ProtectDemoDatabases, true, false]
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-demo-aurora-cluster'
+  
+  AuroraInstance:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Explicit name required for demo environment identification"
+    #checkov:skip=CKV_AWS_118:Enhanced monitoring not required for demo environment
+    Type: AWS::RDS::DBInstance
+    # As AuroraCluster above. The instance is deleted BEFORE the cluster, so
+    # leaving this at the default (Snapshot) would keep a snapshot step on the
+    # teardown critical path even with the cluster set to Delete.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub '${StackPrefix}-demo-aurora-instance'
+      Engine: aurora-postgresql
+      DBInstanceClass: db.serverless
+      DBClusterIdentifier: !Ref AuroraCluster
+      PubliclyAccessible: false
+  
+  ###############################################################################################
+  ### DMS Resources
+  ###############################################################################################
+  
+  # S3 Bucket for DMS Schema Conversion
+  DmsS3Bucket:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "Access logging not required for demo environment"
+    #checkov:skip=CKV_AWS_18:Access logging not required for demo environment
+    #checkov:skip=CKV_AWS_145:SSE-S3 required - DMS Schema Conversion does not support SSE-KMS (https://docs.aws.amazon.com/dms/latest/userguide/schema-conversion-s3.html)
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub '${StackPrefix}-dms-sc-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  DmsS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DmsS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt DmsS3Bucket.Arn
+              - !Sub '${DmsS3Bucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+  
+  # IAM Roles for DMS
+  DmsScS3AccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allow DMS SC to access S3 bucket
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - dms.amazonaws.com
+                - !Sub 'dms.${AWS::Region}.amazonaws.com'
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3BucketAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${StackPrefix}-dms-sc-${AWS::AccountId}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${StackPrefix}-dms-sc-${AWS::AccountId}/*'
+  
+  DmsScSecretsManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allow DMS SC to access database secrets
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - dms.amazonaws.com
+                - !Sub 'dms.${AWS::Region}.amazonaws.com'
+                - schema-conversion.dms.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+      Policies:
+        - PolicyName: SecretsManagerCMKAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:CreateGrant
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey*
+                Resource: !Ref KmsKeyArn
+  
+  DMSSubnetGroup:
+    Type: AWS::DMS::ReplicationSubnetGroup
+    Properties:
+      ReplicationSubnetGroupIdentifier: !Sub '${StackPrefix}-demo-dms-subnet-group'
+      ReplicationSubnetGroupDescription: DMS subnet group
+      SubnetIds: !Ref SubnetIds
+  
+  # DMS Schema Conversion Resources
+  SourceDataProvider:
+    Type: AWS::DMS::DataProvider
+    Properties:
+      DataProviderIdentifier: !Sub '${StackPrefix}-demo-dms-sc-source'
+      DataProviderName: !Sub '${StackPrefix}-demo-dms-sc-source'
+      # 'db2' is Db2 LUW. DMS uses 'db2zos' for Db2 on z/OS.
+      Engine: db2
+      Settings:
+        # Key name confirmed against dms-sc-project-db2.yaml: the schema calls
+        # this IbmDb2LuwSettings, not Db2LuwSettings.
+        IbmDb2LuwSettings:
+          DatabaseName: BOBSDB
+          Port: !GetAtt Db2DB.Endpoint.Port
+          ServerName: !GetAtt Db2DB.Endpoint.Address
+          SslMode: none
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-demo-dms-sc-source'
+  
+  DestinationDataProvider:
+    Type: AWS::DMS::DataProvider
+    Properties:
+      DataProviderIdentifier: !Sub '${StackPrefix}-demo-dms-sc-target'
+      DataProviderName: !Sub '${StackPrefix}-demo-dms-sc-target'
+      Engine: aurora_postgresql
+      Settings:
+        PostgreSqlSettings:
+          DatabaseName: demodb
+          Port: !GetAtt AuroraCluster.Endpoint.Port
+          ServerName: !GetAtt AuroraCluster.Endpoint.Address
+          SslMode: require
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-demo-dms-sc-target'
+  
+  InstanceProfileIdentifier:
+    Type: AWS::DMS::InstanceProfile
+    Properties:
+      Description: DMS SC instance profile
+      NetworkType: IPV4
+      InstanceProfileIdentifier: !Sub '${StackPrefix}-dms-sc-profile'
+      InstanceProfileName: !Sub '${StackPrefix}-dms-sc-profile'
+      SubnetGroupIdentifier: !Ref DMSSubnetGroup
+      PubliclyAccessible: false
+      VpcSecurityGroups:
+        - !Ref EC2SecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-dms-sc-profile'
+  
+  DmsScMigrationProject:
+    Type: AWS::DMS::MigrationProject
+    DependsOn: [DmsScS3AccessRole, DmsScSecretsManagerRole]
+    Properties:
+      Description: DMS SC Migration Project
+      InstanceProfileIdentifier: !Ref InstanceProfileIdentifier
+      MigrationProjectName: !Sub '${StackPrefix}-demo-dms-sc-migration-project'
+      SchemaConversionApplicationAttributes:
+        # !Ref on an S3 bucket returns the bucket NAME only; DMS Schema
+        # Conversion requires a full s3:// URI here or the schema conversion
+        # workspace fails to initialize (see dms-sc-project-db2.yaml).
+        S3BucketPath: !Sub 's3://${DmsS3Bucket}'
+        S3BucketRoleArn: !GetAtt DmsScS3AccessRole.Arn
+      SourceDataProviderDescriptors:
+        - DataProviderArn: !GetAtt SourceDataProvider.DataProviderArn
+          SecretsManagerSecretId: !Ref DemoDb2AdminUserSecret
+          SecretsManagerAccessRoleArn: !GetAtt DmsScSecretsManagerRole.Arn
+          DataProviderIdentifier: !Ref SourceDataProvider
+      TargetDataProviderDescriptors:
+        - DataProviderArn: !GetAtt DestinationDataProvider.DataProviderArn
+          SecretsManagerSecretId: !Ref DemoPostgresAdminUserSecret
+          SecretsManagerAccessRoleArn: !GetAtt DmsScSecretsManagerRole.Arn
+          DataProviderIdentifier: !Ref DestinationDataProvider
+      TransformationRules: |
+        {"rules": [
+          {"rule-type": "transformation", "rule-id": "10", "rule-name": "lowercase1", "rule-action": "convert-lowercase", "rule-target": "table", "object-locator": {"table-name": "%"}}
+        ]}
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-demo-dms-sc-migration-project'
+  
+  # DMS Replication Instance
+  DMSReplicationInstance:
+    Type: AWS::DMS::ReplicationInstance
+    Properties:
+      ReplicationInstanceIdentifier: !Sub '${StackPrefix}-demo-dms-instance'
+      ReplicationInstanceClass: dms.t3.medium
+      # Pinned rather than left to the DMS default. The default is whatever DMS
+      # currently treats as latest, so an unpinned instance can change engine
+      # version between deployments - and Db2 LUW source support varies by
+      # version. Overridable via the DmsEngineVersion parameter.
+      EngineVersion: !Ref DmsEngineVersion
+      AllocatedStorage: 50
+      VpcSecurityGroupIds:
+        - !Ref EC2SecurityGroupId
+      ReplicationSubnetGroupIdentifier: !Ref DMSSubnetGroup
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-demo-dms-instance'
+  
+  DMSSourceEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      EndpointIdentifier: !Sub '${StackPrefix}-demo-db2-source-endpoint'
+      EndpointType: source
+      # 'db2' is Db2 LUW. Use 'db2zos' for Db2 on z/OS.
+      EngineName: db2
+      ServerName: !GetAtt Db2DB.Endpoint.Address
+      Port: 50000
+      DatabaseName: BOBSDB
+      # Must match the master username in DemoDb2AdminUserSecret.
+      Username: !Sub '{{resolve:secretsmanager:${DemoDb2AdminUserSecret}:SecretString:username}}'
+      Password: !Sub '{{resolve:secretsmanager:${DemoDb2AdminUserSecret}:SecretString:password}}'
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-demo-db2-source-endpoint'
+  
+  DMSTargetEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      EndpointIdentifier: !Sub '${StackPrefix}-demo-postgres-target-endpoint'
+      EndpointType: target
+      EngineName: aurora-postgresql
+      ServerName: !GetAtt AuroraCluster.Endpoint.Address
+      Port: 5432
+      DatabaseName: demodb
+      Username: postgres
+      Password: !Sub '{{resolve:secretsmanager:${DemoPostgresAdminUserSecret}:SecretString:password}}'
+      SslMode: require
+      # Disable foreign-key enforcement for the duration of DMS's load session.
+      #
+      # WHY: the full load runs MaxFullLoadSubTasks tables in parallel and DMS
+      # does not order them parent-before-child, so a child table's COPY can
+      # arrive before its parent has committed. That produced exactly four
+      # failures, while the five parent reference tables loaded cleanly:
+      #   addresses   -> fk_addresses_customer   Key (customer_id)=(1) not present
+      #   books       -> fk_books_book_type      Key (book_type_id)=(1) not present
+      #   books_cover -> fk_books_cover_book     Key (book_id)=(1) not present
+      #   listings    -> fk_listings_book        Key (book_id)=(1) not present
+      # DMS reported these only as "Failed to load data from csv file" and the
+      # task still finished FULL_LOAD_ONLY_FINISHED, so the step looked to have
+      # succeeded with 0 rows in the tables that matter.
+      #
+      # session_replication_role = replica makes PostgreSQL skip user triggers
+      # and FK checks for this session only - it is the standard approach for
+      # bulk loads and does not alter the schema. Referential integrity is
+      # intact afterwards because the data being loaded is already consistent
+      # in the Db2 source.
+      #
+      # Applies per connection, so it covers each of the parallel subtasks.
+      PostgreSqlSettings:
+        AfterConnectScript: "SET session_replication_role = 'replica'"
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackPrefix}-demo-postgres-target-endpoint'
+
+  
+  ###############################################################################################
+  ### SSM Documents for Database Setup
+  ###############################################################################################
+  
+  # ===========================================================================
+  # Stage the Db2 demo SQL scripts for deployment.
+  # ---------------------------------------------------------------------------
+  # Three sources, in precedence order:
+  #
+  #   1. SQLScriptsURL   - an externally hosted zip. Explicit override, wins.
+  #   2. ScriptsBucket   - an S3 bucket populated by deploy-with-demo-infra.sh
+  #                        from one-click-deployment/db2-to-postgres/demo-scripts/
+  #                        immediately before create-stack. This is the default
+  #                        path.
+  #   3. Repo checkout   - /workshop/MMA-Test-Manager/.../demo-scripts, unpacked
+  #                        by RepoDownloadDocument from CodeURL. Fallback.
+  #
+  # Why S3 is preferred over the checkout: CodeURL defaults to a published
+  # Workshop Studio asset that PREDATES the Db2 track, so its
+  # one-click-deployment/ holds only the oracle and sqlserver directories and
+  # there is no demo-scripts/ to copy. RunRepoDownload still reports success -
+  # the download and unzip both work, the content is simply wrong - and this
+  # document then failed on the missing directory. Staging the scripts in S3
+  # from the working tree decouples the demo SQL from whatever CodeURL happens
+  # to point at.
+  #
+  # The checkout fallback is retained so that a CodeURL archive which DOES
+  # contain the Db2 track keeps working with no bucket required.
+  # ===========================================================================
+  SetupEnvironmentDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-demo-setup-environment'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Stage Db2 demo SQL scripts from S3 or the repo checkout
+        parameters:
+          SQLScriptsURL:
+            type: String
+            default: ''
+          ScriptsBucket:
+            type: String
+            default: ''
+          ScriptsPrefix:
+            type: String
+            default: 'demo-scripts/'
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          - action: aws:runShellScript
+            name: setupEnvironment
+            inputs:
+              runCommand:
+                - |
+                  #!/bin/bash
+                  set -euo pipefail
+
+                  WORKDIR="/home/{{ VSCodeUser }}/mma-demo"
+                  REPO_SCRIPTS="/workshop/MMA-Test-Manager/one-click-deployment/db2-to-postgres/demo-scripts"
+
+                  echo "Setting up working directory..."
+                  mkdir -p "$WORKDIR"
+                  cd "$WORKDIR"
+
+                  SCRIPTS_URL="{{ SQLScriptsURL }}"
+                  SCRIPTS_BUCKET="{{ ScriptsBucket }}"
+                  SCRIPTS_PREFIX="{{ ScriptsPrefix }}"
+
+                  if [ -n "$SCRIPTS_URL" ]; then
+                    # Precedence 1 - explicit external override.
+                    echo "SQLScriptsURL set; downloading scripts from $SCRIPTS_URL"
+                    wget -q -O db2-scripts.zip "$SCRIPTS_URL"
+                    unzip -o db2-scripts.zip
+                  elif [ -n "$SCRIPTS_BUCKET" ]; then
+                    # Precedence 2 - S3, staged by the deploy script.
+                    S3_URI="s3://$SCRIPTS_BUCKET/$SCRIPTS_PREFIX"
+                    echo "Copying demo scripts from $S3_URI ..."
+
+                    # --exclude '*' then --include '*.sql' keeps this to the SQL
+                    # files even if other objects share the prefix.
+                    if ! aws s3 cp "$S3_URI" "$WORKDIR/" \
+                           --recursive --exclude '*' --include '*.sql' \
+                           --only-show-errors; then
+                      echo "ERROR: failed to copy demo scripts from $S3_URI"
+                      echo "Check that the bucket exists, that the deploy script"
+                      echo "uploaded demo-scripts/ into it, and that the instance"
+                      echo "role grants s3:GetObject and s3:ListBucket on it."
+                      exit 1
+                    fi
+
+                    # cp --recursive exits 0 when the prefix matches nothing, so
+                    # confirm something actually landed rather than trusting it.
+                    if ! ls "$WORKDIR"/*.sql >/dev/null 2>&1; then
+                      echo "ERROR: no .sql files copied from $S3_URI"
+                      echo "The bucket or prefix is empty. Re-run the deploy"
+                      echo "script, which uploads demo-scripts/ before"
+                      echo "create-stack, or set SQLScriptsURL instead."
+                      exit 1
+                    fi
+                  else
+                    # Precedence 3 - repo checkout staged by repo-download.
+                    echo "Copying demo scripts from the repo checkout..."
+                    if [ ! -d "$REPO_SCRIPTS" ]; then
+                      echo "ERROR: $REPO_SCRIPTS not found."
+                      echo "The code checkout should have been staged by the repo-download"
+                      echo "document before this step. Check that RunRepoDownload succeeded."
+                      echo ""
+                      echo "Note: the default CodeURL asset predates the Db2 track and"
+                      echo "does NOT contain demo-scripts/. Deploy via"
+                      echo "deploy-with-demo-infra.sh, which stages the scripts in S3,"
+                      echo "or pass a CodeURL zip built from this repo."
+                      exit 1
+                    fi
+                    cp "$REPO_SCRIPTS"/*.sql "$WORKDIR/"
+                  fi
+
+                  # Fail here, with a clear list, rather than midway through
+                  # deployment: the schema document exits on the first missing file.
+                  MISSING=0
+                  for f in 01_user_rds_db2_phase1.sql 01_user_rds_db2_phase2.sql \
+                           01_user_rds_db2_phase3.sql 02_schema_db2_v2.sql \
+                           03_data_db2_v2.sql 04_complex_schema_db2_v2.sql; do
+                    if [ ! -s "$WORKDIR/$f" ]; then
+                      echo "ERROR: required script missing or empty: $f"
+                      MISSING=1
+                    fi
+                  done
+                  [ "$MISSING" -eq 0 ] || { echo "Aborting: incomplete script set."; exit 1; }
+
+                  echo "Staged scripts:"
+                  ls -l "$WORKDIR"/*.sql
+
+                  chown -R {{ VSCodeUser }}:{{ VSCodeUser }} "$WORKDIR"
+                  echo "Setup complete!"
+                                 
+  
+  # ===========================================================================
+  # PLACEHOLDER - Db2 DEMO schema deployment
+  # ---------------------------------------------------------------------------
+  # The Oracle track ran SQL*Plus/SQLCL against numbered scripts
+  # (01_user.sql .. 04_complex_schema_v2.sql) fetched from DemoSQLScriptsURL,
+  # then created a read-only test user with PL/SQL.
+  #
+  # None of that transfers to Db2:
+  #   - No Oracle client is installed (see compute-stack.yaml PLACEHOLDER),
+  #     so there is no `sql` binary.
+  #   - PL/SQL (DECLARE/BEGIN/EXECUTE IMMEDIATE, dba_users, all_tables) has no
+  #     Db2 equivalent. Db2 uses SYSCAT.* catalog views and compound SQL.
+  #   - Db2 authenticates against OS users, so "CREATE USER" does not exist.
+  #     On RDS for Db2 you create a database-authenticated user via
+  #     rdsadmin.add_user; on EC2 you create a Linux user first.
+  #
+  # TWO THINGS WERE NEEDED BEFORE THIS COULD WORK - both now resolved:
+  #   1. Db2-dialect demo schema scripts, published at DemoSQLScriptsURL.
+  #      Converted; see db2-conversion/mma-workshop-db2-scripts. The Oracle
+  #      01_user.sql became three RDS phase files because RDS for Db2 withholds
+  #      SYSADM/SYSCTRL from the master user, so CREATE BUFFERPOOL and
+  #      CREATE TABLESPACE must become rdsadmin.* stored procedure calls, and
+  #      those only resolve while connected to the RDSADMIN database.
+  #   2. A way to execute them. Option (b) chosen: JDBC via
+  #      db2-luw-client-mcp/tools/Db2ScriptRunner.java. No IBM client install is
+  #      needed, which matters because the Data Server Driver Package requires an
+  #      IBM account and cannot be fetched unattended.
+  #
+  # EXECUTION MODEL - two constraints drive the shape of the steps below:
+  #   * Db2ScriptRunner takes ONE JDBC URL per invocation, and JDBC has no
+  #     CONNECT statement. So each target database needs its own invocation, and
+  #     the CONNECT / CONNECT RESET lines in the scripts must be stripped.
+  #   * The committed scripts carry a `USING <DEMO_PASSWORD>` placeholder rather
+  #     than a real password, so no credential is in version control. For
+  #     02/03/04 the placeholder disappears with the stripped CONNECT lines; for
+  #     the phase files it is substituted from the deploy-time DEMO password.
+  #
+  # RUN ORDER: phase1 (RDSADMIN) -> phase2 (BOBSDB) -> 02/03/04 as DEMO ->
+  # phase3 (read-only grants, which must follow table creation).
+  # ===========================================================================
+  DeployDb2SchemaDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-deploy-db2-schema'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: >-
+          Deploy Db2 DEMO schema to RDS for Db2 and create the read-only test
+          user, using Db2ScriptRunner over JDBC.
+        parameters:
+          ScriptsBucket:
+            type: String
+            default: ''
+          ScriptsPrefix:
+            type: String
+            default: 'demo-scripts/'
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          # -------------------------------------------------------------------
+          # Step 1: stage the JCC driver and prepare the scripts for JDBC.
+          # -------------------------------------------------------------------
+          # The driver is fetched from Maven Central rather than extracted from
+          # db2-luw-mcp-server-1.0.0.jar, even though that jar bundles it. Reason:
+          # RunApplicationDeployment (which runs build-all.sh and produces the
+          # jar) depends only on RunRepoDatabaseSetup, so it runs in PARALLEL
+          # with this document - the jar is not guaranteed to exist yet. A direct
+          # download removes the race. The version matches the jcc dependency in
+          # db2-luw-client-mcp/pom.xml.
+          - action: aws:runShellScript
+            name: prepareScripts
+            inputs:
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -euo pipefail
+
+                  WORKDIR="/home/{{ VSCodeUser }}/mma-demo"
+                  JCC_VERSION="11.5.9.0"
+                  JCC_JAR="$WORKDIR/jcc-$JCC_VERSION.jar"
+
+                  cd "$WORKDIR"
+
+                  echo "Fetching IBM JCC driver $JCC_VERSION from Maven Central..."
+                  wget -q -O "$JCC_JAR" \
+                    "https://repo1.maven.org/maven2/com/ibm/db2/jcc/$JCC_VERSION/jcc-$JCC_VERSION.jar"
+
+                  # Fall back to the MCP fat jar if Maven Central is unreachable.
+                  if [ ! -s "$JCC_JAR" ]; then
+                    echo "Download failed; trying the MCP server jar instead..."
+                    MCP_JAR=$(find /workshop/MMA-Test-Manager/db2-luw-client-mcp/target \
+                                -name 'db2-luw-mcp-server-*.jar' 2>/dev/null | head -1)
+                    if [ -n "$MCP_JAR" ]; then
+                      unzip -o -j "$MCP_JAR" 'BOOT-INF/lib/jcc-*.jar' -d "$WORKDIR"
+                      JCC_JAR=$(find "$WORKDIR" -name 'jcc-*.jar' | head -1)
+                    fi
+                  fi
+                  [ -s "$JCC_JAR" ] || { echo "ERROR: no JCC driver available"; exit 1; }
+                  echo "JCC driver: $JCC_JAR"
+
+                  # Db2ScriptRunner is the program that actually executes the SQL
+                  # scripts, so it must be present before any deploy step runs.
+                  #
+                  # Sourced from S3 first, falling back to the repo checkout, for
+                  # the same reason as the SQL scripts themselves: the default
+                  # CodeURL asset predates the Db2 track, so
+                  # db2-luw-client-mcp/tools/ does not exist in it. Staging the
+                  # runner alongside the scripts means neither depends on what
+                  # CodeURL happens to contain.
+                  RUNNER="$WORKDIR/Db2ScriptRunner.java"
+                  REPO_RUNNER="/workshop/MMA-Test-Manager/db2-luw-client-mcp/tools/Db2ScriptRunner.java"
+                  SCRIPTS_BUCKET="{{ ScriptsBucket }}"
+                  SCRIPTS_PREFIX="{{ ScriptsPrefix }}"
+
+                  if [ -n "$SCRIPTS_BUCKET" ]; then
+                    RUNNER_URI="s3://$SCRIPTS_BUCKET/${!SCRIPTS_PREFIX}Db2ScriptRunner.java"
+                    echo "Fetching Db2ScriptRunner from $RUNNER_URI ..."
+                    if ! aws s3 cp "$RUNNER_URI" "$RUNNER" --only-show-errors; then
+                      echo "S3 copy failed; falling back to the repo checkout..."
+                      # `|| true` so a missing checkout reaches the explicit error
+                      # below instead of aborting here on set -e.
+                      cp "$REPO_RUNNER" "$RUNNER" 2>/dev/null || true
+                    fi
+                  else
+                    echo "No ScriptsBucket set; copying Db2ScriptRunner from the repo checkout..."
+                    cp "$REPO_RUNNER" "$RUNNER" 2>/dev/null || true
+                  fi
+
+                  # Without the runner nothing downstream can execute a script, so
+                  # fail here with an explicit message rather than letting java
+                  # report a missing file three steps later.
+                  if [ ! -s "$RUNNER" ]; then
+                    echo "ERROR: Db2ScriptRunner.java not available at $RUNNER"
+                    echo "Tried S3 (${!SCRIPTS_BUCKET:-<unset>}) and $REPO_RUNNER."
+                    echo "Deploy via deploy-with-demo-infra.sh, which stages the"
+                    echo "runner in S3, or pass a CodeURL zip built from this repo."
+                    exit 1
+                  fi
+
+                  # Confirm the runner is loadable and its usage contract is intact
+                  # before the deploy steps depend on it, so a truncated or
+                  # corrupted copy is caught now rather than mid-deployment.
+                  #
+                  # Invoked with no arguments: the runner prints its usage banner
+                  # and exits 2. That non-zero exit is expected, so the output is
+                  # captured rather than piped - under `set -o pipefail` the exit 2
+                  # would fail the pipeline even when the banner matched.
+                  RUNNER_OUT=$(java --source 11 "$RUNNER" 2>&1 || true)
+                  if ! printf '%s' "$RUNNER_OUT" | grep -q 'usage: Db2ScriptRunner'; then
+                    echo "ERROR: $RUNNER did not compile, or its usage banner is missing."
+                    echo "Output was:"
+                    printf '%s\n' "$RUNNER_OUT" | head -20
+                    exit 1
+                  fi
+                  echo "Db2ScriptRunner staged and verified: $RUNNER"
+
+                  # JDBC cannot execute CONNECT / CONNECT RESET - the connection is
+                  # established by the runner from its URL argument. Strip those
+                  # lines from every script. Matches the terminators actually used:
+                  # ';' in 02/03, '#' in 04.
+                  #
+                  # This also removes the `USING <DEMO_PASSWORD>` placeholder that
+                  # the committed scripts carry, so no password substitution is
+                  # needed for 02/03/04 - the runner authenticates from its own
+                  # arguments instead.
+                  for f in 02_schema_db2_v2.sql 03_data_db2_v2.sql 04_complex_schema_db2_v2.sql; do
+                    [ -f "$f" ] || { echo "WARNING: $f not found in scripts zip"; continue; }
+                    sed -i -E '/^[[:space:]]*CONNECT[[:space:]]+(TO|RESET)/Id' "$f"
+                    echo "Prepared $f"
+                  done
+
+                  # 04 uses '#' as its terminator because validation_pkg.is_valid_email
+                  # contains an email regex with a literal '@', which would break the
+                  # conventional -td@. The CLP takes that from the -td# flag, but
+                  # Db2ScriptRunner reads only the in-file directive, so prepend it.
+                  #
+                  # The guard matches the directive exactly as Db2ScriptRunner detects
+                  # it - any '--' comment containing "SET TERMINATOR", case-insensitive
+                  # - so we neither double-prepend on a re-run nor fight a directive the
+                  # script already carries. Note that because the runner scans comments
+                  # this loosely, prose merely *mentioning* the directive would also be
+                  # honoured; keep such wording out of the scripts.
+                  if [ -f 04_complex_schema_db2_v2.sql ]; then
+                    if grep -qiE '^[[:space:]]*--.*SET[[:space:]]+TERMINATOR' \
+                         04_complex_schema_db2_v2.sql; then
+                      echo "04_complex_schema_db2_v2.sql already declares a terminator:"
+                      grep -inE '^[[:space:]]*--.*SET[[:space:]]+TERMINATOR' \
+                        04_complex_schema_db2_v2.sql | head -3
+                    else
+                      sed -i '1i --#SET TERMINATOR #' 04_complex_schema_db2_v2.sql
+                      echo "Added terminator directive to 04_complex_schema_db2_v2.sql"
+                    fi
+                  else
+                    echo "WARNING: 04_complex_schema_db2_v2.sql not found; skipping terminator fix"
+                  fi
+
+                  # RUNSTATS via SYSPROC.ADMIN_CMD fails as DEMO with SQLCODE=-551
+                  # (SQLSTATE 42501): phase2 grants DEMOGRP the ROLE_PROCEDURES
+                  # role, which covers SYSIBM procedures, but ADMIN_CMD lives in
+                  # SYSPROC and is not included. On RDS for Db2 the master user
+                  # cannot GRANT EXECUTE on it either - SYSPROC routines are
+                  # managed by the service.
+                  #
+                  # These calls only refresh optimizer statistics after the bulk
+                  # load. Dropping them leaves the schema and all rows intact;
+                  # Db2 uses real-time statistics and will collect them on demand,
+                  # so query plans on a 56-row demo dataset are unaffected.
+                  #
+                  # Removed here rather than in the .sql file because that file is
+                  # generated ("Do not hand-edit; regenerate instead"), and
+                  # because a self-managed Db2 target - where DEMO could hold
+                  # DBADM and these would succeed - should keep them.
+                  if [ -f 03_data_db2_v2.sql ]; then
+                    runstats_count=$(grep -cE "^[[:space:]]*CALL[[:space:]]+SYSPROC\.ADMIN_CMD" \
+                                       03_data_db2_v2.sql || true)
+                    if [ "$runstats_count" -gt 0 ]; then
+                      sed -i -E "/^[[:space:]]*CALL[[:space:]]+SYSPROC\.ADMIN_CMD/Id" \
+                        03_data_db2_v2.sql
+                      echo "Removed $runstats_count SYSPROC.ADMIN_CMD (RUNSTATS) call(s) from 03_data_db2_v2.sql;"
+                      echo "DEMO lacks EXECUTE on SYSPROC.ADMIN_CMD on RDS for Db2."
+                    fi
+                  fi
+
+                  chown -R {{ VSCodeUser }}:{{ VSCodeUser }} "$WORKDIR"
+                  echo "Preparation complete."
+
+          # -------------------------------------------------------------------
+          # Step 2: RDS setup - phase1 against RDSADMIN, phase2 against BOBSDB.
+          # -------------------------------------------------------------------
+          # Two invocations because Db2ScriptRunner takes one JDBC URL each and
+          # rdsadmin.* procedures only resolve on the RDSADMIN database.
+          - action: aws:runShellScript
+            name: deployRdsSetup
+            inputs:
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -euo pipefail
+
+                  WORKDIR="/home/{{ VSCodeUser }}/mma-demo"
+                  DB2_HOST="${Db2DB.Endpoint.Address}"
+                  DB2_PORT="${Db2DB.Endpoint.Port}"
+                  REGION="${AWS::Region}"
+                  cd "$WORKDIR"
+
+                  JCC_JAR=$(find "$WORKDIR" -name 'jcc-*.jar' | head -1)
+
+                  get_secret() {
+                    aws secretsmanager get-secret-value --secret-id "$1" \
+                      --region "$REGION" --query SecretString --output text
+                  }
+
+                  MASTER_USER=$(get_secret "${DemoDb2AdminUserSecret}" | jq -r .username)
+                  MASTER_PASS=$(get_secret "${DemoDb2AdminUserSecret}" | jq -r .password)
+                  RO_PASS=$(get_secret "${DemoDb2TestUserSecret}" | jq -r .password)
+
+                  # The DEMO password. The committed scripts carry a
+                  # <DEMO_PASSWORD> placeholder rather than a literal, so nothing
+                  # secret lives in version control. It is substituted into the
+                  # phase files here, and 02/03/04 need no substitution at all
+                  # because prepareScripts strips their CONNECT lines outright.
+                  #
+                  # DEMO is a throwaway demo account in a private subnet. To source
+                  # it from Secrets Manager instead, add a DEMO secret alongside
+                  # DemoDb2TestUserSecret and read it here.
+                  DEMO_PASS="Welcome123_"
+
+                  # Substitute placeholders into copies, never the originals, so a
+                  # re-run does not operate on already-substituted files.
+                  for p in phase1 phase2 phase3; do
+                    src="01_user_rds_db2_$p.sql"
+                    [ -f "$src" ] || { echo "ERROR: $src missing from scripts zip"; exit 1; }
+                    sed -e "s|<DEMO_PASSWORD>|$DEMO_PASS|g" \
+                        -e "s|<RO_PASSWORD>|$RO_PASS|g" \
+                        "$src" > "/tmp/$src"
+                  done
+                  chmod 600 /tmp/01_user_rds_db2_phase*.sql
+
+                  echo "=== Phase 1: bufferpool, tablespaces, users (RDSADMIN) ==="
+                  java -cp "$JCC_JAR" Db2ScriptRunner.java \
+                    "jdbc:db2://$DB2_HOST:$DB2_PORT/RDSADMIN" \
+                    "$MASTER_USER" "$MASTER_PASS" \
+                    /tmp/01_user_rds_db2_phase1.sql
+
+                  # rdsadmin.* procedures are asynchronous. Give the tablespace and
+                  # user creation time to land before phase2 references them.
+                  echo "Waiting 30s for asynchronous rdsadmin tasks to complete..."
+                  sleep 30
+
+                  echo "=== Phase 2: schema and privileges (BOBSDB) ==="
+                  java -cp "$JCC_JAR" Db2ScriptRunner.java \
+                    "jdbc:db2://$DB2_HOST:$DB2_PORT/BOBSDB" \
+                    "$MASTER_USER" "$MASTER_PASS" \
+                    /tmp/01_user_rds_db2_phase2.sql
+
+                  echo "RDS setup phases complete."
+
+          # -------------------------------------------------------------------
+          # Step 3: schema, data, routines as DEMO; then the read-only grants.
+          # -------------------------------------------------------------------
+          # 02/03/04 run as DEMO so the objects are owned by DEMO rather than by
+          # the master user. phase3 runs last and as the master user, because it
+          # grants on tables that 02 has only just created.
+          - action: aws:runShellScript
+            name: deployDemoSchema
+            inputs:
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -euo pipefail
+
+                  WORKDIR="/home/{{ VSCodeUser }}/mma-demo"
+                  DB2_HOST="${Db2DB.Endpoint.Address}"
+                  DB2_PORT="${Db2DB.Endpoint.Port}"
+                  REGION="${AWS::Region}"
+                  cd "$WORKDIR"
+
+                  JCC_JAR=$(find "$WORKDIR" -name 'jcc-*.jar' | head -1)
+                  JDBC_URL="jdbc:db2://$DB2_HOST:$DB2_PORT/BOBSDB"
+                  DEMO_PASS="Welcome123_"
+
+                  MASTER_USER=$(aws secretsmanager get-secret-value \
+                    --secret-id "${DemoDb2AdminUserSecret}" --region "$REGION" \
+                    --query SecretString --output text | jq -r .username)
+                  MASTER_PASS=$(aws secretsmanager get-secret-value \
+                    --secret-id "${DemoDb2AdminUserSecret}" --region "$REGION" \
+                    --query SecretString --output text | jq -r .password)
+
+                  echo "=== Schema, data and routines (as DEMO) ==="
+                  # One invocation per script so a failure is attributable, and so
+                  # the '#' terminator in 04 cannot affect 02/03.
+                  for f in 02_schema_db2_v2.sql 03_data_db2_v2.sql 04_complex_schema_db2_v2.sql; do
+                    echo "--- $f ---"
+                    java -cp "$JCC_JAR" Db2ScriptRunner.java \
+                      "$JDBC_URL" DEMO "$DEMO_PASS" "$f"
+                  done
+
+                  echo "=== Phase 3: read-only grants (as master) ==="
+                  # Must follow 02: GRANT SELECT names tables that 02 creates.
+                  java -cp "$JCC_JAR" Db2ScriptRunner.java \
+                    "$JDBC_URL" "$MASTER_USER" "$MASTER_PASS" \
+                    /tmp/01_user_rds_db2_phase3.sql
+
+                  # Remove the substituted copies; they contain plaintext passwords.
+                  rm -f /tmp/01_user_rds_db2_phase*.sql
+
+                  echo "Db2 demo schema deployment complete."
+
+          - action: aws:runShellScript
+            name: updateSecrets
+            inputs:
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -e
+
+                  DB2_HOST="${Db2DB.Endpoint.Address}"
+                  REGION=${AWS::Region}
+
+                  # Add host + engine to the secrets so the MCP servers and Test
+                  # Manager can resolve a full connection from the ARN alone.
+                  # The db2-luw-client-mcp DatabaseConfig reads: host, port,
+                  # dbname (optional, defaults BOBSDB), username, password.
+                  ADMIN_SECRET="${DemoDb2AdminUserSecret}"
+                  ADMIN_SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id $ADMIN_SECRET --region $REGION --query SecretString --output text)
+                  UPDATED_ADMIN=$(echo $ADMIN_SECRET_JSON | jq --arg host "$DB2_HOST" '. + {host: $host, engine: "db2"}')
+                  aws secretsmanager put-secret-value --secret-id $ADMIN_SECRET --region $REGION --secret-string "$UPDATED_ADMIN"
+
+                  TEST_USER_SECRET="${DemoDb2TestUserSecret}"
+                  TEST_SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id $TEST_USER_SECRET --region $REGION --query SecretString --output text)
+                  UPDATED_TEST=$(echo $TEST_SECRET_JSON | jq --arg host "$DB2_HOST" '. + {host: $host, engine: "db2"}')
+                  aws secretsmanager put-secret-value --secret-id $TEST_USER_SECRET --region $REGION --secret-string "$UPDATED_TEST"
+
+                  echo "Secrets updated with host information"
+  
+  DeployPostgresSchemaDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-deploy-postgres-schema'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Create PostgreSQL test user and setup permissions
+        mainSteps:
+          - action: aws:runShellScript
+            name: setupPostgresUser
+            inputs:
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -e
+                  
+                  PG_HOST="${AuroraCluster.Endpoint.Address}"
+                  PG_PASS=$(aws secretsmanager get-secret-value --secret-id ${DemoPostgresAdminUserSecret} --region ${AWS::Region} --query SecretString --output text | jq -r .password)
+                  
+                  # Get test user password from Secrets Manager
+                  REGION=${AWS::Region}
+                  TEST_USER_SECRET="${DemoPostgresTestUserSecret}"
+                  TEST_USER_PASS=$(aws secretsmanager get-secret-value --secret-id $TEST_USER_SECRET --region $REGION --query SecretString --output text | jq -r .password)
+                  
+                  echo "Creating PostgreSQL test user..."
+                  PGPASSWORD=$PG_PASS psql -h $PG_HOST -p 5432 -U postgres -d demodb <<EOF
+                  DO \$\$
+                  BEGIN
+                      IF NOT EXISTS (SELECT FROM pg_user WHERE usename = 'postgres_ro_user') THEN
+                          CREATE USER postgres_ro_user WITH PASSWORD '$TEST_USER_PASS';
+                      END IF;
+                  END
+                  \$\$;
+                  GRANT CONNECT ON DATABASE demodb TO postgres_ro_user;
+                  CREATE SCHEMA IF NOT EXISTS demo;
+                  GRANT USAGE ON SCHEMA demo TO postgres_ro_user;
+                  GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA demo TO postgres_ro_user;
+                  GRANT EXECUTE ON ALL PROCEDURES IN SCHEMA demo TO postgres_ro_user;
+                  GRANT SELECT ON ALL TABLES IN SCHEMA demo TO postgres_ro_user;
+                  ALTER DEFAULT PRIVILEGES IN SCHEMA demo GRANT SELECT ON TABLES TO postgres_ro_user;
+                  ALTER DEFAULT PRIVILEGES IN SCHEMA demo GRANT EXECUTE ON ROUTINES TO postgres_ro_user;
+                  GRANT pg_read_all_data TO postgres_ro_user;
+                  ALTER USER postgres_ro_user SET default_transaction_read_only = on;
+                  EOF
+                  
+                  echo "PostgreSQL test user created successfully"
+          - action: aws:runShellScript
+            name: updateSecrets
+            inputs:
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -e
+                
+                  PG_HOST="${AuroraCluster.Endpoint.Address}"
+                  REGION=${AWS::Region}
+
+                  # Update admin secret with host
+                  ADMIN_SECRET="${DemoPostgresAdminUserSecret}"
+                  ADMIN_SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id $ADMIN_SECRET --region $REGION --query SecretString --output text)
+                  UPDATED_ADMIN=$(echo $ADMIN_SECRET_JSON | jq --arg host "$PG_HOST" '. + {host: $host, engine: "postgres"}')
+                  aws secretsmanager put-secret-value --secret-id $ADMIN_SECRET --region $REGION --secret-string "$UPDATED_ADMIN"
+                  
+                  # Update test user secret with host
+                  TEST_USER_SECRET="${DemoPostgresTestUserSecret}"
+                  TEST_SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id $TEST_USER_SECRET --region $REGION --query SecretString --output text)
+                  UPDATED_TEST=$(echo $TEST_SECRET_JSON | jq --arg host "$PG_HOST" '. + {host: $host, engine: "postgres"}')
+                  aws secretsmanager put-secret-value --secret-id $TEST_USER_SECRET --region $REGION --secret-string "$UPDATED_TEST"
+                  
+                  echo "Secrets updated with host information"
+  
+
+  ###############################################################################################
+  ### SSM Documents for DMS Schema Conversion and Migration
+  ###############################################################################################
+  
+  DMSSchemaConversionDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-dms-schema-conversion'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Run DMS Schema Conversion (Assessment, Conversion, Export)
+        parameters:
+          MigrationProjectName:
+            type: String
+            default: !Sub '${StackPrefix}-demo-dms-sc-migration-project'
+          SourceSchema:
+            type: String
+            default: 'DEMO'
+          TargetSchema:
+            type: String
+            default: 'demo'
+        mainSteps:
+          - action: aws:runShellScript
+            name: runSchemaConversion
+            inputs:
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -e
+                  
+                  PROJECT="{{ MigrationProjectName }}"
+                  REGION="${AWS::Region}"
+                  SOURCE_SCHEMA="{{ SourceSchema }}"
+                  TARGET_SCHEMA="{{ TargetSchema }}"
+                  
+                  export AWS_PAGER=""
+                  
+                  log() {
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+                  }
+                  
+                  # Get source and target server names
+                  SOURCE_SERVER=$(aws dms describe-migration-projects \
+                    --region $REGION \
+                    --filters Name=migration-project-identifier,Values=$PROJECT \
+                    --query 'MigrationProjects[0].SourceDataProviderDescriptors[0].DataProviderArn' \
+                    --output text | xargs -I {} aws dms describe-data-providers \
+                    --region $REGION \
+                    --filters Name=data-provider-identifier,Values={} \
+                    --query 'DataProviders[0].Settings.IbmDb2LuwSettings.ServerName' \
+                    --output text)
+                  
+                  TARGET_SERVER=$(aws dms describe-migration-projects \
+                    --region $REGION \
+                    --filters Name=migration-project-identifier,Values=$PROJECT \
+                    --query 'MigrationProjects[0].TargetDataProviderDescriptors[0].DataProviderArn' \
+                    --output text | xargs -I {} aws dms describe-data-providers \
+                    --region $REGION \
+                    --filters Name=data-provider-identifier,Values={} \
+                    --query 'DataProviders[0].Settings.PostgreSqlSettings.ServerName' \
+                    --output text)
+                  
+                  log "Source Server: $SOURCE_SERVER"
+                  log "Target Server: $TARGET_SERVER"
+                  
+                  # 1. Assessment
+                  log "Starting assessment..."
+                  ASSESSMENT_ID=$(aws dms start-metadata-model-assessment \
+                    --region $REGION \
+                    --migration-project-identifier $PROJECT \
+                    --selection-rules "{\"rules\": [
+                      {\"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"include-schema\", \"object-locator\": {\"server-name\": \"$SOURCE_SERVER\", \"schema-name\": \"$SOURCE_SCHEMA\"}, \"rule-action\": \"include\"},
+                      {\"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"exclude-dr-tables\", \"object-locator\": {\"server-name\": \"$SOURCE_SERVER\", \"schema-name\": \"$SOURCE_SCHEMA\", \"table-name\": \"DR$%\"}, \"rule-action\": \"exclude\"}
+                    ]}" \
+                    --query 'RequestIdentifier' --output text)
+                  
+                  log "Waiting for assessment to complete..."
+                  while true; do
+                    STATUS=$(aws dms describe-metadata-model-assessments --region $REGION --migration-project-identifier $PROJECT --query "Requests[?RequestIdentifier=='$ASSESSMENT_ID'].Status" --output text)
+                    log "Assessment status: $STATUS"
+                    [[ "$STATUS" == "SUCCESS" ]] && break
+                    [[ "$STATUS" == "FAILED" ]] && exit 1
+                    sleep 5
+                  done
+                  
+                  # 2. Conversion
+                  log "Starting conversion..."
+                  CONVERSION_ID=$(aws dms start-metadata-model-conversion \
+                    --region $REGION \
+                    --migration-project-identifier $PROJECT \
+                    --selection-rules "{\"rules\": [
+                      {\"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"include-schema\", \"object-locator\": {\"server-name\": \"$SOURCE_SERVER\", \"schema-name\": \"$SOURCE_SCHEMA\"}, \"rule-action\": \"include\"},
+                      {\"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"exclude-dr-tables\", \"object-locator\": {\"server-name\": \"$SOURCE_SERVER\", \"schema-name\": \"$SOURCE_SCHEMA\", \"table-name\": \"DR$%\"}, \"rule-action\": \"exclude\"}
+                    ]}" \
+                    --query 'RequestIdentifier' --output text)
+                  
+                  log "Waiting for conversion to complete..."
+                  while true; do
+                    STATUS=$(aws dms describe-metadata-model-conversions --region $REGION --migration-project-identifier $PROJECT --query "Requests[?RequestIdentifier=='$CONVERSION_ID'].Status" --output text)
+                    log "Conversion status: $STATUS"
+                    [[ "$STATUS" == "SUCCESS" ]] && break
+                    [[ "$STATUS" == "FAILED" ]] && exit 1
+                    sleep 5
+                  done
+                  
+                  # 3. Export to target
+                  log "Starting export to target..."
+                  EXPORT_ID=$(aws dms start-metadata-model-export-to-target \
+                    --region $REGION \
+                    --migration-project-identifier $PROJECT \
+                    --selection-rules "{\"rules\": [
+                      {\"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"include-schema\", \"object-locator\": {\"server-name\": \"$TARGET_SERVER\", \"schema-name\": \"$TARGET_SCHEMA\"}, \"rule-action\": \"include\"}
+                    ]}" \
+                    --query 'RequestIdentifier' --output text)
+                  
+                  log "Waiting for export to complete..."
+                  while true; do
+                    STATUS=$(aws dms describe-metadata-model-exports-to-target --region $REGION --migration-project-identifier $PROJECT --query "Requests[?RequestIdentifier=='$EXPORT_ID'].Status" --output text)
+                    log "Export status: $STATUS"
+                    [[ "$STATUS" == "SUCCESS" ]] && break
+                    [[ "$STATUS" == "FAILED" ]] && exit 1
+                    sleep 5
+                  done
+                  
+                  log "Schema conversion completed successfully"
+  
+  DMSDataMigrationDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-dms-data-migration'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Run DMS Data Migration
+        parameters:
+          ReplicationInstanceId:
+            type: String
+            default: !Sub '${StackPrefix}-demo-dms-instance'
+          SourceEndpointId:
+            type: String
+            default: !Sub '${StackPrefix}-demo-db2-source-endpoint'
+          TargetEndpointId:
+            type: String
+            default: !Sub '${StackPrefix}-demo-postgres-target-endpoint'
+          TaskId:
+            type: String
+            default: !Sub '${StackPrefix}-demo-data-migration-task'
+          SourceSchema:
+            type: String
+            default: 'DEMO'
+        mainSteps:
+          - action: aws:runShellScript
+            name: runDataMigration
+            inputs:
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -e
+                  
+                  REGION="${AWS::Region}"
+                  REPLICATION_INSTANCE="{{ ReplicationInstanceId }}"
+                  SOURCE_ENDPOINT="{{ SourceEndpointId }}"
+                  TARGET_ENDPOINT="{{ TargetEndpointId }}"
+                  TASK_ID="{{ TaskId }}"
+                  SOURCE_SCHEMA="{{ SourceSchema }}"
+                  
+                  export AWS_PAGER=""
+                  
+                  log() {
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+                  }
+                  
+                  # Test source endpoint connection
+                  log "Testing source endpoint connection..."
+                  aws dms test-connection \
+                    --region $REGION \
+                    --replication-instance-arn $(aws dms describe-replication-instances --region $REGION --filters Name=replication-instance-id,Values=$REPLICATION_INSTANCE --query 'ReplicationInstances[0].ReplicationInstanceArn' --output text) \
+                    --endpoint-arn $(aws dms describe-endpoints --region $REGION --filters Name=endpoint-id,Values=$SOURCE_ENDPOINT --query 'Endpoints[0].EndpointArn' --output text)
+                  
+                  # Test target endpoint connection
+                  log "Testing target endpoint connection..."
+                  aws dms test-connection \
+                    --region $REGION \
+                    --replication-instance-arn $(aws dms describe-replication-instances --region $REGION --filters Name=replication-instance-id,Values=$REPLICATION_INSTANCE --query 'ReplicationInstances[0].ReplicationInstanceArn' --output text) \
+                    --endpoint-arn $(aws dms describe-endpoints --region $REGION --filters Name=endpoint-id,Values=$TARGET_ENDPOINT --query 'Endpoints[0].EndpointArn' --output text)
+                  
+                  # Wait for connections to complete
+                  log "Waiting for connection tests to complete..."
+                  SOURCE_ARN=$(aws dms describe-endpoints --region $REGION --filters Name=endpoint-id,Values=$SOURCE_ENDPOINT --query 'Endpoints[0].EndpointArn' --output text)
+                  TARGET_ARN=$(aws dms describe-endpoints --region $REGION --filters Name=endpoint-id,Values=$TARGET_ENDPOINT --query 'Endpoints[0].EndpointArn' --output text)
+                  
+                  while true; do
+                    SOURCE_STATUS=$(aws dms describe-connections --region $REGION --filters Name=endpoint-arn,Values=$SOURCE_ARN --query 'Connections[0].Status' --output text)
+                    TARGET_STATUS=$(aws dms describe-connections --region $REGION --filters Name=endpoint-arn,Values=$TARGET_ARN --query 'Connections[0].Status' --output text)
+                    
+                    log "Source endpoint status: $SOURCE_STATUS, Target endpoint status: $TARGET_STATUS"
+                    
+                    if [[ "$SOURCE_STATUS" == "successful" ]] && [[ "$TARGET_STATUS" == "successful" ]]; then
+                      log "Both connections successful"
+                      break
+                    elif [[ "$SOURCE_STATUS" == "failed" ]] || [[ "$TARGET_STATUS" == "failed" ]]; then
+                      log "Connection test failed. Exiting."
+                      exit 1
+                    fi
+                    
+                    sleep 5
+                  done
+                  
+                  # Create replication task
+                  log "Creating replication task..."
+                  aws dms create-replication-task \
+                    --region $REGION \
+                    --replication-task-identifier $TASK_ID \
+                    --tags "Key=Name,Value=$TASK_ID" \
+                    --source-endpoint-arn $(aws dms describe-endpoints --region $REGION --filters Name=endpoint-id,Values=$SOURCE_ENDPOINT --query 'Endpoints[0].EndpointArn' --output text) \
+                    --target-endpoint-arn $(aws dms describe-endpoints --region $REGION --filters Name=endpoint-id,Values=$TARGET_ENDPOINT --query 'Endpoints[0].EndpointArn' --output text) \
+                    --replication-instance-arn $(aws dms describe-replication-instances --region $REGION --filters Name=replication-instance-id,Values=$REPLICATION_INSTANCE --query 'ReplicationInstances[0].ReplicationInstanceArn' --output text) \
+                    --migration-type full-load \
+                    --table-mappings "{
+                      \"rules\": [
+                        {
+                          \"rule-type\": \"selection\",
+                          \"rule-id\": \"1\",
+                          \"rule-name\": \"include-demo-schema\",
+                          \"object-locator\": {
+                            \"schema-name\": \"$SOURCE_SCHEMA\",
+                            \"table-name\": \"%\"
+                          },
+                          \"rule-action\": \"include\"
+                        },
+                        {
+                          \"rule-type\": \"selection\",
+                          \"rule-id\": \"2\",
+                          \"rule-name\": \"exclude-dr-tables\",
+                          \"object-locator\": {
+                            \"schema-name\": \"$SOURCE_SCHEMA\",
+                            \"table-name\": \"DR$%\"
+                          },
+                          \"rule-action\": \"exclude\"
+                        },
+                        {
+                          \"rule-type\": \"transformation\",
+                          \"rule-id\": \"3\",
+                          \"rule-name\": \"schema-lowercase\",
+                          \"rule-target\": \"schema\",
+                          \"object-locator\": {
+                            \"schema-name\": \"%\"
+                          },
+                          \"rule-action\": \"convert-lowercase\"
+                        },
+                        {
+                          \"rule-type\": \"transformation\",
+                          \"rule-id\": \"4\",
+                          \"rule-name\": \"table-lowercase\",
+                          \"rule-target\": \"table\",
+                          \"object-locator\": {
+                            \"schema-name\": \"%\",
+                            \"table-name\": \"%\"
+                          },
+                          \"rule-action\": \"convert-lowercase\"
+                        },
+                        {
+                          \"rule-type\": \"transformation\",
+                          \"rule-id\": \"5\",
+                          \"rule-name\": \"column-lowercase\",
+                          \"rule-target\": \"column\",
+                          \"object-locator\": {
+                            \"schema-name\": \"%\",
+                            \"table-name\": \"%\",
+                            \"column-name\": \"%\"
+                          },
+                          \"rule-action\": \"convert-lowercase\"
+                        }
+                      ]
+                    }" \
+                    --replication-task-settings "{
+                      \"TargetMetadata\": {
+                        \"TargetSchema\": \"\",
+                        \"SupportLobs\": true,
+                        \"FullLobMode\": false,
+                        \"LobChunkSize\": 32,
+                        \"LimitedSizeLobMode\": true,
+                        \"LobMaxSize\": 256
+                      },
+                      \"Logging\": {
+                        \"EnableLogging\": true,
+                        \"LogComponents\": [
+                          {\"Id\": \"TRANSFORMATION\", \"Severity\": \"LOGGER_SEVERITY_DEFAULT\"},
+                          {\"Id\": \"SOURCE_UNLOAD\", \"Severity\": \"LOGGER_SEVERITY_DEFAULT\"},
+                          {\"Id\": \"TARGET_LOAD\", \"Severity\": \"LOGGER_SEVERITY_DEFAULT\"},
+                          {\"Id\": \"SOURCE_CAPTURE\", \"Severity\": \"LOGGER_SEVERITY_DEFAULT\"},
+                          {\"Id\": \"TARGET_APPLY\", \"Severity\": \"LOGGER_SEVERITY_DEFAULT\"},
+                          {\"Id\": \"TASK_MANAGER\", \"Severity\": \"LOGGER_SEVERITY_DEFAULT\"}
+                        ]
+                      },
+                      \"ControlTablesSettings\": {
+                        \"ControlSchema\": \"\",
+                        \"HistoryTimeslotInMinutes\": 5,
+                        \"HistoryTableEnabled\": false,
+                        \"SuspendedTablesTableEnabled\": false,
+                        \"StatusTableEnabled\": false
+                      },
+                      \"FullLoadSettings\": {
+                        \"TargetTablePrepMode\": \"DO_NOTHING\",
+                        \"CreatePkAfterFullLoad\": false,
+                        \"StopTaskCachedChangesApplied\": false,
+                        \"StopTaskCachedChangesNotApplied\": false,
+                        \"MaxFullLoadSubTasks\": 8,
+                        \"TransactionConsistencyTimeout\": 600,
+                        \"CommitRate\": 10000
+                      },
+                      \"ValidationSettings\": {
+                        \"EnableValidation\": true,
+                        \"ValidationMode\": \"ROW_LEVEL\"
+                      }
+                    }" || log "Task may already exist, continuing..."
+                  
+                  # Wait for task to be ready and start it
+                  log "Waiting for task to start..."
+                  while true; do
+                    STATUS=$(aws dms describe-replication-tasks --region $REGION --filters Name=replication-task-id,Values=$TASK_ID --query 'ReplicationTasks[0].Status' --output text)
+                    log "Task status: $STATUS"
+                    
+                    if [[ "$STATUS" == "ready" ]]; then
+                      log "Task is ready, starting task..."
+                      aws dms start-replication-task \
+                        --region $REGION \
+                        --replication-task-arn $(aws dms describe-replication-tasks --region $REGION --filters Name=replication-task-id,Values=$TASK_ID --query 'ReplicationTasks[0].ReplicationTaskArn' --output text) \
+                        --start-replication-task-type start-replication
+                      sleep 5
+                    elif [[ "$STATUS" == "running" ]] || [[ "$STATUS" == "stopped" ]]; then
+                      break
+                    elif [[ "$STATUS" == "failed" ]]; then
+                      log "Task failed. Exiting."
+                      exit 1
+                    fi
+                    sleep 10
+                  done
+                  
+                  # Monitor task progress
+                  log "Monitoring task progress..."
+                  while true; do
+                    TASK_INFO=$(aws dms describe-replication-tasks --region $REGION --filters Name=replication-task-id,Values=$TASK_ID --query 'ReplicationTasks[0].[Status,ReplicationTaskStats.FullLoadProgressPercent,ReplicationTaskStats.TablesLoaded,ReplicationTaskStats.TablesLoading]' --output text)
+                    log "Status: $TASK_INFO"
+                    
+                    STATUS=$(echo $TASK_INFO | awk '{print $1}')
+                    if [[ "$STATUS" == "stopped" ]]; then
+                      # 'stopped' means the full load ENDED, not that it worked:
+                      # DMS suspends a table that fails and still finishes with
+                      # FULL_LOAD_ONLY_FINISHED. Breaking here unconditionally
+                      # reported CREATE_COMPLETE for a migration that moved zero
+                      # rows into four of fourteen tables. Check TablesErrored.
+                      ERRORED=$(aws dms describe-replication-tasks --region $REGION \
+                        --filters Name=replication-task-id,Values=$TASK_ID \
+                        --query 'ReplicationTasks[0].ReplicationTaskStats.TablesErrored' \
+                        --output text)
+                      [[ "$ERRORED" == "None" || -z "$ERRORED" ]] && ERRORED=0
+                      if [[ "$ERRORED" -gt 0 ]]; then
+                        log "Task finished but $ERRORED table(s) errored. Per-table detail:"
+                        TASK_ARN=$(aws dms describe-replication-tasks --region $REGION \
+                          --filters Name=replication-task-id,Values=$TASK_ID \
+                          --query 'ReplicationTasks[0].ReplicationTaskArn' --output text)
+                        aws dms describe-table-statistics --region $REGION \
+                          --replication-task-arn "$TASK_ARN" \
+                          --query "TableStatistics[?TableState!='Table completed'].[SchemaName,TableName,FullLoadRows,TableState]" \
+                          --output text || true
+                        log "See the task log group dms-tasks-* for the target-side error."
+                        exit 1
+                      fi
+                      log "Task completed successfully"
+                      break
+                    elif [[ "$STATUS" == "failed" ]]; then
+                      log "Task failed"
+                      exit 1
+                    fi
+                    sleep 30
+                  done
+
+Outputs:
+  StackName:
+    Description: Stack name for reference
+    Value: !Ref 'AWS::StackName'
+    Export:
+      Name: !Sub '${AWS::StackName}-Name'
+  
+  Db2Endpoint:
+    Description: Db2 source endpoint
+    Value: !GetAtt Db2DB.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-Db2Endpoint'
+  
+  PostgresEndpoint:
+    Description: Aurora PostgreSQL endpoint
+    Value: !GetAtt AuroraCluster.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-PostgresEndpoint'
+  
+  Db2AdminSecretArn:
+    Description: Db2 admin credentials secret ARN
+    Value: !Ref DemoDb2AdminUserSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-Db2SecretArn'
+  
+  PostgresAdminSecretArn:
+    Description: PostgreSQL admin credentials secret ARN
+    Value: !Ref DemoPostgresAdminUserSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-PostgresSecretArn'
+  
+  Db2TestUserSecretArn:
+    Description: Db2 test user credentials secret ARN
+    Value: !Ref DemoDb2TestUserSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-DemoDb2TestUserSecretArn'
+  
+  PostgresTestUserSecretArn:
+    Description: PostgreSQL test user credentials secret ARN
+    Value: !Ref DemoPostgresTestUserSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-DemoPostgresTestUserSecretArn'
+  
+  DMSReplicationInstanceArn:
+    Description: DMS replication instance ARN
+    Value: !Ref DMSReplicationInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-DMSInstanceArn'
+  
+  DmsS3BucketName:
+    Description: S3 bucket for DMS Schema Conversion
+    Value: !Ref DmsS3Bucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DmsS3Bucket'
+  
+  DmsMigrationProjectName:
+    Description: DMS Schema Conversion Migration Project name
+    Value: !Sub '${StackPrefix}-demo-dms-sc-migration-project'
+    Export:
+      Name: !Sub '${AWS::StackName}-DmsMigrationProject'
+  
+  SetupEnvironmentDocumentName:
+    Description: SSM Document for environment setup
+    Value: !Ref SetupEnvironmentDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-SetupEnvironmentDoc'
+  
+  DeployDb2SchemaDocumentName:
+    Description: SSM Document for Db2 schema deployment
+    Value: !Ref DeployDb2SchemaDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-DeployDb2SchemaDoc'
+  
+  DeployPostgresSchemaDocumentName:
+    Description: SSM Document for PostgreSQL schema deployment
+    Value: !Ref DeployPostgresSchemaDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-DeployPostgresSchemaDoc'
+
+  DMSSchemaConversionDocumentName:
+    Description: SRun DMS Schema Conversion (Assessment, Conversion, Export)
+    Value: !Ref DMSSchemaConversionDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-DMSSchemaConversionDoc'
+
+  DMSDataMigrationDocumentName:
+    Description: Run DMS Data Migration
+    Value: !Ref DMSDataMigrationDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-DMSDataMigrationDoc'
+
+  # Informational only - nothing imports this export. It is emitted only when
+  # DemoSQLScriptsURL is non-empty (i.e. when scripts were fetched from a URL
+  # rather than taken from the repo checkout), because CloudFormation rejects an
+  # export whose value is empty or whitespace-only.
+  SQLScriptsURL:
+    Condition: HasSQLScriptsURL
+    Description: SQL scripts URL for reference (absent when using repo scripts)
+    Value: !Ref DemoSQLScriptsURL
+    Export:
+      Name: !Sub '${AWS::StackName}-SQLScriptsURL'

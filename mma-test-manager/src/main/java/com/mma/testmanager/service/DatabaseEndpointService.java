@@ -138,6 +138,7 @@ public class DatabaseEndpointService {
             case "MYSQL", "AURORA_MYSQL" -> "mysql";
             case "MSSQL" -> "sqlserver";
             case "SYBASE_ASE", "SYBASE" -> "sybase";
+            case "DB2", "DB2_LUW", "IBMDB2LUW", "DB2LUW" -> "db2";
             default -> vendorName.toLowerCase();
         };
     }

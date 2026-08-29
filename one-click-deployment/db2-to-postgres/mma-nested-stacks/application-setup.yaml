@@ -1,0 +1,643 @@
+Description: Application setup SSM document for MMA applications
+
+Parameters:
+  StackPrefix:
+    Type: String
+  UseCloudFront:
+    Type: String
+    Default: 'false'
+  EC2InstanceId:
+    Type: String
+  SecurityGroupId:
+    Type: String
+  PublicDnsName:
+    Type: String  
+
+Conditions:
+  UseCloudFrontDistribution: !Equals [!Ref UseCloudFront, 'true']
+
+# The AWSRegionsPrefixListID mapping was moved to network-stack.yaml along with
+# the CloudFront ingress rule that used it. Nothing here consumes it any more.
+
+Resources:
+
+  CloudFrontCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Condition: UseCloudFrontDistribution
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        Name: !Ref SecurityGroupId
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: all
+          EnableAcceptEncodingGzip: false
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Accept-Charset
+              - Authorization
+              - Origin
+              - Accept
+              - Referer
+              - Host
+              - Accept-Language
+              - Accept-Encoding
+              - Accept-Datetime
+          QueryStringsConfig:
+            QueryStringBehavior: all
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: UseCloudFrontDistribution
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W70
+            reason: "CloudFront default certificate enforces TLSv1. TLS 1.2 requires custom certificate with SNI."
+          - id: W10
+            reason: "Access logging not required for demo environment. Enable in production with S3 bucket for logs."
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        DefaultCacheBehavior:
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+          CachePolicyId: !Ref CloudFrontCachePolicy
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          TargetOriginId: !Sub '${AWS::StackName}-origin'
+          ViewerProtocolPolicy: https-only
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+        Origins:
+          - DomainName: !Ref PublicDnsName
+            Id: !Sub '${AWS::StackName}-origin'
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 120
+              OriginKeepaliveTimeout: 60
+
+  # EC2SecurityGroupIngressCloudFront was MOVED to network-stack.yaml (as
+  # IngressCloudFront), together with the AWSRegionsPrefixListID mapping it uses.
+  # It modified a security group owned by another stack, which was one of the
+  # cross-stack references that deadlocked stack deletion. network-stack.yaml now
+  # owns the group and every rule on it, and takes a UseCloudFront parameter to
+  # decide whether to add this rule.
+
+  # ===========================================================================
+  # Repo download, split out of ApplicationDeploymentDocument.
+  # ---------------------------------------------------------------------------
+  # This used to be the DownloadCode step of ApplicationDeploymentDocument. It
+  # is its own document so that BOTH downstream branches can depend on it:
+  #
+  #   RunRepoDownload
+  #     |- RunApplicationDeployment       (build-all.sh, the slow Maven build)
+  #     '- RunDemoSetupEnvironment -> RunDemoDb2Schema
+  #
+  # The demo branch needs /workshop/MMA-Test-Manager to exist because it reads
+  # BOTH the Db2 demo SQL scripts (one-click-deployment/db2-to-postgres/
+  # demo-scripts/) and db2-luw-client-mcp/tools/Db2ScriptRunner.java straight
+  # out of the checkout. Previously the download lived inside the application
+  # branch, which runs in parallel with the demo branch, so those reads raced
+  # against the unzip. Splitting it keeps the Maven build parallel - no added
+  # wall-clock time - while guaranteeing the checkout exists for both.
+  # ===========================================================================
+  RepoDownloadDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-repo-download'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Download and unpack the MMA application code checkout
+        parameters:
+          CodeURL:
+            type: String
+          CodeBucket:
+            type: String
+            default: ''
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          - name: DownloadCode
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - |
+                  #!/bin/bash
+                  set -euo pipefail
+
+                  CODE_URL="{{ CodeURL }}"
+                  CODE_BUCKET="{{ CodeBucket }}"
+                  ZIP=/tmp/mma-apps.zip
+
+                  mkdir -p /workshop
+
+                  # Fetch via the AWS CLI when the code archive lives in a bucket
+                  # this instance has been granted access to, so the object is read
+                  # with the instance role over SigV4 and the bucket can stay
+                  # private. Previously this was an unconditional
+                  # `wget "{{ CodeURL }}"`, which is unauthenticated and therefore
+                  # required the object to be publicly readable or presigned.
+                  #
+                  # Gated on CodeBucket rather than on the shape of CodeURL: the
+                  # stack grants s3:GetObject on CodeBucket only, so switching to
+                  # the CLI for any S3-looking URL would break third-party buckets
+                  # (including the published Workshop Studio asset that the CodeURL
+                  # parameter defaults to) with AccessDenied. Empty CodeBucket
+                  # therefore means "fetch over HTTPS", preserving that default.
+                  #
+                  # Accepted CodeURL forms, all reduced to a key within CodeBucket:
+                  #   s3://bucket/key
+                  #   https://bucket.s3[.region].amazonaws.com/key   (virtual-hosted)
+                  #   https://s3[.region].amazonaws.com/bucket/key   (path-style)
+                  KEY=""
+                  if [ -n "$CODE_BUCKET" ]; then
+                    case "$CODE_URL" in
+                      s3://*)
+                        rest="${CODE_URL#s3://}"
+                        [ "${rest%%/*}" = "$CODE_BUCKET" ] && KEY="${rest#*/}" ;;
+                      https://*.s3.amazonaws.com/*|https://*.s3.*.amazonaws.com/*)
+                        rest="${CODE_URL#https://}"; host="${rest%%/*}"
+                        [ "${host%%.s3.*}" = "$CODE_BUCKET" ] && KEY="${rest#*/}" ;;
+                      https://s3.amazonaws.com/*|https://s3.*.amazonaws.com/*)
+                        rest="${CODE_URL#https://}"; rest="${rest#*/}"
+                        [ "${rest%%/*}" = "$CODE_BUCKET" ] && KEY="${rest#*/}" ;;
+                    esac
+                    if [ -z "$KEY" ]; then
+                      echo "ERROR: CodeBucket is set to '$CODE_BUCKET' but CodeURL does"
+                      echo "not reference that bucket:"
+                      echo "  $CODE_URL"
+                      echo "Either correct CodeBucket, or leave it empty to fetch over HTTPS."
+                      exit 1
+                    fi
+                  fi
+
+                  if [ -n "$KEY" ]; then
+                    echo "Downloading code archive from s3://$CODE_BUCKET/$KEY using the instance role..."
+                    if ! aws s3 cp "s3://$CODE_BUCKET/$KEY" "$ZIP" --only-show-errors; then
+                      echo "ERROR: failed to download s3://$CODE_BUCKET/$KEY"
+                      echo "The instance role needs s3:GetObject on that object, and"
+                      echo "the object must exist. Verify the archive was uploaded"
+                      echo "before the stack was created."
+                      exit 1
+                    fi
+                  else
+                    echo "Downloading code archive from $CODE_URL over HTTPS..."
+                    if ! wget -q -O "$ZIP" "$CODE_URL"; then
+                      echo "ERROR: failed to download $CODE_URL"
+                      echo "A non-S3 CodeURL must be publicly reachable. To read a"
+                      echo "private S3 object with the instance role instead, set the"
+                      echo "CodeBucket stack parameter."
+                      exit 1
+                    fi
+                  fi
+
+                  # A failed or truncated download would otherwise surface later as
+                  # a confusing unzip error, so validate the archive here.
+                  [ -s "$ZIP" ] || { echo "ERROR: $ZIP is empty"; exit 1; }
+                  if ! unzip -tq "$ZIP"; then
+                    echo "ERROR: $ZIP is not a valid zip archive"
+                    exit 1
+                  fi
+
+                  unzip -o "$ZIP" -d /workshop/MMA-Test-Manager
+                  chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /workshop
+                  ln -sf /workshop/MMA-Test-Manager /home/{{ VSCodeUser }}/workspace
+                  mkdir -p /var/log/mma-apps
+                  chown -R {{ VSCodeUser }}:{{ VSCodeUser }} /var/log/mma-apps
+                  echo "Code checkout staged at /workshop/MMA-Test-Manager"
+
+  ApplicationDeploymentDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-application-deploy'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Build MMA applications (the checkout is staged by RepoDownloadDocument)
+        parameters:
+          CodeURL:
+            type: String
+            default: ''
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          - name: BuildApplications
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - |
+                  su - {{ VSCodeUser }} <<'EOFBUILD'
+                  export PATH=/usr/share/maven/bin:/usr/bin:/usr/local/bin:$PATH
+                  cd /workshop/MMA-Test-Manager
+                  ./build-all.sh > /var/log/mma-apps/build.log 2>&1
+                  echo "Build completed at $(date)" >> /var/log/mma-apps/build.log
+                  echo "Last few lines of messages for build.log:"
+                  tail -n 15 /var/log/mma-apps/build.log"
+                  EOFBUILD
+                - echo 'export PATH=/usr/share/maven/bin:$PATH' >> /home/{{ VSCodeUser }}/.bashrc
+
+  ConfigureDemoInfraSecretsDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-configure-demo-infra-secrets'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Configure Secerts from Demo Infra
+        parameters:
+          DemoInfraStackName:
+            type: String
+            default: ''
+          RepoDBSecretArn:
+            type: String
+            default: ''
+          AdminPassword:
+            type: String
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:          
+          - name: ConfigureDemoInfraSecrets
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - !Sub |
+                  #!/bin/bash
+                  set -e
+                  
+                  REGION=${AWS::Region}
+                  DEMO_STACK="{{ DemoInfraStackName }}"
+                  
+                  if [ -z "$DEMO_STACK" ]; then
+                    echo "Demo infrastructure stack name not provided, skipping configuration"
+                    exit 0
+                  fi
+                  
+                  echo "Fetching secrets from demo infrastructure stack: $DEMO_STACK"
+                  
+                  # Get secret ARNs from stack outputs
+                  DB2_SECRET_ARN=$(aws cloudformation describe-stacks --stack-name $DEMO_STACK --region $REGION --query "Stacks[0].Outputs[?OutputKey=='Db2AdminSecretArn'].OutputValue" --output text)
+                  PG_SECRET_ARN=$(aws cloudformation describe-stacks --stack-name $DEMO_STACK --region $REGION --query "Stacks[0].Outputs[?OutputKey=='PostgresAdminSecretArn'].OutputValue" --output text)
+                  DB2_TEST_SECRET_ARN=$(aws cloudformation describe-stacks --stack-name $DEMO_STACK --region $REGION --query "Stacks[0].Outputs[?OutputKey=='Db2TestUserSecretArn'].OutputValue" --output text)
+                  PG_TEST_SECRET_ARN=$(aws cloudformation describe-stacks --stack-name $DEMO_STACK --region $REGION --query "Stacks[0].Outputs[?OutputKey=='PostgresTestUserSecretArn'].OutputValue" --output text)
+                  
+                  # Get S3 bucket from DMS migration project
+                  DMS_PROJECT=${StackPrefix}-demo-dms-sc-migration-project
+                  S3_BUCKET=$(aws dms describe-migration-projects --region $REGION --query "MigrationProjects[?MigrationProjectName=='$DMS_PROJECT'].SchemaConversionApplicationAttributes.S3BucketPath" --output text 2>/dev/null || echo "")
+                  # S3BucketPath is returned by DMS ALREADY prefixed with s3://,
+                  # so prepending it again produced "s3://s3://bucket/..." in
+                  # mma.s3.default-path and broke the app's S3 loading. Strip any
+                  # leading scheme, then add exactly one.
+                  S3_BUCKET="${!S3_BUCKET#s3://}"
+                  S3_PATH="s3://$S3_BUCKET/$DMS_PROJECT"
+                  echo "Db2 Secret: $DB2_SECRET_ARN"
+                  echo "PostgreSQL Secret: $PG_SECRET_ARN"
+                  echo "Db2 Test Secret: $DB2_TEST_SECRET_ARN"
+                  echo "PostgreSQL Test Secret: $PG_TEST_SECRET_ARN"
+                  echo "S3 Bucket Path: $S3_PATH"
+                  
+                  # Configure MCP servers
+                  su - {{ VSCodeUser }} <<EOFMCP
+                  cd /workshop/MMA-Test-Manager
+                  
+                  # Db2 LUW MCP
+                  sed -i.bak "s|mcp.db.connection.detail=.*|mcp.db.connection.detail=$DB2_SECRET_ARN|g" db2-luw-client-mcp/application-secretsmanager.properties
+                  
+                  # PostgreSQL MCP
+                  sed -i.bak "s|mcp.db.connection.detail=.*|mcp.db.connection.detail=$PG_SECRET_ARN|g" postgres-client-mcp/application-secretsmanager.properties
+                  sed -i.bak "s|mcp.db.connection.readonly=.*|mcp.db.connection.readonly=false|g" postgres-client-mcp/application-secretsmanager.properties
+
+                  # Configure Kiro CLI agent  
+                  mkdir -p ~/.kiro/agents/
+                  cp ./docs/sample-db2-postgres-mma-agent-for-kiro-cli.json ~/.kiro/agents/mma-agent.json 2>/dev/null || true
+                  sed -i "s|MMA-Samples|MMA-Test-Manager|g" ~/.kiro/agents/mma-agent.json
+
+                  echo "MCP servers configured"
+                  EOFMCP
+
+
+
+                  # Update test manager configuration with demo secrets
+                  cat > /workshop/MMA-Test-Manager/mma-test-manager/application-secretsmanager.properties <<EOFTM
+                  spring.application.name=mma-test-manager
+                  spring.jpa.hibernate.ddl-auto=update
+                  spring.flyway.enabled=true
+                  spring.flyway.baseline-on-migrate=true
+                  spring.devtools.restart.enabled=false
+                  spring.devtools.livereload.enabled=false
+                  server.port=8082
+                  server.servlet.context-path=/
+
+                  # Handle X-Forwarded-* headers from CloudFront/proxy
+                  server.forward-headers-strategy=native
+
+                  mma.security.username=admin
+                  mma.security.password={{ AdminPassword }}
+                  
+                  mma.repo.type=secretsmanager
+                  mma.repo.secret={{ RepoDBSecretArn }}
+
+                  mma.s3.default-path=$S3_PATH
+                  mma.kiro.command=/home/{{ VSCodeUser }}/.local/bin/kiro-cli chat --agent mma-agent --no-interactive
+                  mma.kiro.max-retries=10
+                  
+                  mma.sourcedb.connection.type=secretsmanager
+                  mma.sourcedb.connection.secret=$DB2_SECRET_ARN
+                  
+                  mma.targetdb.connection.type=secretsmanager
+                  mma.targetdb.connection.secret=$PG_SECRET_ARN
+                  
+                  mma.sourcedb.test.type=secretsmanager
+                  #mma.sourcedb.test.secret=$DB2_TEST_SECRET_ARN
+                  mma.sourcedb.test.secret=$DB2_SECRET_ARN
+
+                  mma.targetdb.test.type=secretsmanager
+                  #mma.targetdb.test.secret=$PG_TEST_SECRET_ARN
+                  mma.targetdb.test.secret=$PG_SECRET_ARN
+                  EOFTM
+                  
+                  chown {{ VSCodeUser }}:{{ VSCodeUser }} /workshop/MMA-Test-Manager/mma-test-manager/application-secretsmanager.properties
+                  
+                  echo "Demo infrastructure secrets configured successfully"
+
+  ConfigureManualInfraSecretsDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-configure-manual-infra-secrets'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Configure Secerts from Manual Infra from Input
+        parameters:
+          Db2SecretArn:
+            type: String
+            default: ''
+          PostgresSecretArn:
+            type: String
+            default: ''
+          Db2TestSecretArn:
+            type: String
+            default: ''
+          PostgresTestSecretArn:
+            type: String
+            default: ''
+          S3DMSProjectPath:
+            type: String
+            default: ''
+          RepoDBSecretArn:
+            type: String
+            default: ''
+          AdminPassword:
+            type: String
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+        mainSteps:
+          - name: ConfigureManualSecrets
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - |
+                  #!/bin/bash
+                  
+                  DB2_SECRET_ARN="{{ Db2SecretArn }}"
+                  PG_SECRET_ARN="{{ PostgresSecretArn }}"
+                  DB2_TEST_SECRET_ARN="{{ Db2TestSecretArn }}"
+                  PG_TEST_SECRET_ARN="{{ PostgresTestSecretArn }}"
+                  S3_PATH="{{ S3DMSProjectPath }}"
+                  # Configure MCP servers if secrets provided
+                  if [ -n "$DB2_SECRET" ] && [ -n "$PG_SECRET" ]; then
+                  su - {{ VSCodeUser }} <<EOFMCP
+                  cd /workshop/MMA-Test-Manager
+                    
+                    sed -i.bak "s|mcp.db.connection.detail=.*|mcp.db.connection.detail=$DB2_SECRET|g" db2-luw-client-mcp/application-secretsmanager.properties
+                    sed -i.bak "s|mcp.db.connection.detail=.*|mcp.db.connection.detail=$PG_SECRET|g" postgres-client-mcp/application-secretsmanager.properties
+                    sed -i.bak "s|mcp.db.connection.readonly=.*|mcp.db.connection.readonly=false|g" postgres-client-mcp/application-secretsmanager.properties
+
+                    EOFMCP
+                    
+                    echo "MCP servers configured with provided secrets"
+                  fi
+
+                  su - {{ VSCodeUser }} <<EOFKIRO
+                  cd /workshop/MMA-Test-Manager
+                  # Configure Kiro CLI agent  
+                  mkdir -p ~/.kiro/agents/
+                  cp ./docs/sample-db2-postgres-mma-agent-for-kiro-cli.json ~/.kiro/agents/mma-agent.json 2>/dev/null || true
+                  sed -i "s|MMA-Samples|MMA-Test-Manager|g" ~/.kiro/agents/mma-agent.json
+                  EOFKIRO
+                  echo "Kiro configured with mma-agent"
+
+                  # Update test manager with provided secrets
+                  cat > /workshop/MMA-Test-Manager/mma-test-manager/application-secretsmanager.properties <<EOFTM
+                  spring.application.name=mma-test-manager
+                  spring.jpa.hibernate.ddl-auto=update
+                  spring.flyway.enabled=true
+                  spring.flyway.baseline-on-migrate=true
+                  spring.devtools.restart.enabled=false
+                  spring.devtools.livereload.enabled=false
+                  server.port=8082
+                  server.servlet.context-path=/
+
+                  # Handle X-Forwarded-* headers from CloudFront/proxy
+                  server.forward-headers-strategy=native
+                                    
+                  mma.security.username=admin
+                  mma.security.password={{ AdminPassword }}
+                  
+                  mma.repo.type=secretsmanager
+                  mma.repo.secret={{ RepoDBSecretArn }}
+
+                  mma.s3.default-path=$S3_PATH
+                  mma.kiro.command=/home/{{ VSCodeUser }}/.local/bin/kiro-cli chat --agent mma-agent --no-interactive
+                  mma.kiro.max-retries=10
+                  
+                  mma.sourcedb.connection.type=secretsmanager
+                  mma.sourcedb.connection.secret=$DB2_SECRET_ARN
+                  
+                  mma.targetdb.connection.type=secretsmanager
+                  mma.targetdb.connection.secret=$PG_SECRET_ARN
+                  
+                  mma.sourcedb.test.type=secretsmanager
+                  #mma.sourcedb.test.secret=$DB2_TEST_SECRET_ARN
+                  mma.sourcedb.test.secret=$DB2_SECRET_ARN
+
+                  mma.targetdb.test.type=secretsmanager
+                  #mma.targetdb.test.secret=$PG_TEST_SECRET_ARN
+                  mma.targetdb.test.secret=$PG_SECRET_ARN
+
+                  EOFTM
+                  
+                  chown {{ VSCodeUser }}:{{ VSCodeUser }} /workshop/MMA-Test-Manager/mma-test-manager/application-secretsmanager.properties
+                  
+                  echo "Manual secrets configured"
+
+  ApplicationPostDeploymentDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${StackPrefix}-application-post-deploy'
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Start Applicaiton and Configure Ngnix/Cloudfront Proxy
+        parameters:
+          VSCodeUser:
+            type: String
+            default: 'awsmma'
+          UseCloudFront:
+            type: String
+            default: 'false'            
+        mainSteps:          
+          - name: StartApplications
+            action: aws:runShellScript
+            inputs:
+              runCommand:
+                - |
+                  cat > /etc/systemd/system/mma-test-manager.service <<'EOF'
+                  [Unit]
+                  Description=MMA Test Manager
+                  After=network.target
+                  
+                  [Service]
+                  Type=simple
+                  User={{ VSCodeUser }}
+                  WorkingDirectory=/workshop/MMA-Test-Manager/mma-test-manager
+                  ExecStart=/usr/bin/java -jar target/mma-test-manager.jar --spring.config.location=application-secretsmanager.properties
+                  Restart=on-failure
+                  RestartSec=10
+                  StandardOutput=append:/var/log/mma-apps/mma-test-manager.log
+                  StandardError=append:/var/log/mma-apps/mma-test-manager-error.log
+                  
+                  [Install]
+                  WantedBy=multi-user.target
+                  EOF
+                  
+                  systemctl daemon-reload
+                  systemctl enable mma-test-manager
+                  systemctl start mma-test-manager
+                  
+                  echo "Application started at $(date)" >> /var/log/mma-apps/startup.log
+          
+          - name: SetupCloudFrontNginx
+            action: aws:runShellScript
+            precondition:
+              StringEquals: ['{{ UseCloudFront }}', 'true']
+            inputs:
+              runCommand:
+                - |
+                  cat > /etc/nginx/conf.d/mma-apps.conf <<'EOF'
+                  server {
+                      listen 80;
+                      listen [::]:80;
+                      server_name *.cloudfront.net;
+                      
+                      # VS Code Server
+                      location /code/ {
+                          proxy_pass http://localhost:8080/;
+                          proxy_set_header Host $host;
+                          proxy_set_header X-Forwarded-Proto https;
+                          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                          proxy_set_header Upgrade $http_upgrade;
+                          proxy_set_header Connection upgrade;
+                          proxy_set_header Accept-Encoding gzip;
+                      }
+                      
+                      # Test Manager
+                      location / {
+                          proxy_pass http://localhost:8082;
+                          proxy_set_header Host $host;
+                          proxy_set_header X-Real-IP $remote_addr;
+                          proxy_set_header X-Forwarded-Proto https;
+                          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      }
+                  }
+                  EOF
+                - systemctl enable nginx
+                - systemctl restart nginx
+
+          - name: SetupNginx
+            action: aws:runShellScript
+            precondition:
+              StringEquals: ['{{ UseCloudFront }}', 'false']
+            inputs:
+              runCommand:
+                - mkdir -p /etc/nginx/ssl
+                - |
+                  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+                    -keyout /etc/nginx/ssl/nginx-selfsigned.key \
+                    -out /etc/nginx/ssl/nginx-selfsigned.crt \
+                    -subj "/C=US/ST=State/L=City/O=Organization/CN=mma-apps"
+                - |
+                  cat > /etc/nginx/conf.d/mma-apps.conf <<'EOF'
+                  server {
+                      listen 80;
+                      return 301 https://$host$request_uri;
+                  }
+                  
+                  server {
+                      listen 443 ssl;
+                      ssl_certificate /etc/nginx/ssl/nginx-selfsigned.crt;
+                      ssl_certificate_key /etc/nginx/ssl/nginx-selfsigned.key;
+                      ssl_protocols TLSv1.2 TLSv1.3;
+                      
+                      # VS Code Server
+                      location /code/ {
+                          proxy_pass http://localhost:8080/;
+                          proxy_set_header Host $host;
+                          proxy_set_header Upgrade $http_upgrade;
+                          proxy_set_header Connection upgrade;
+                          proxy_set_header Accept-Encoding gzip;
+                      }
+                      
+                      # Test Manager
+                      location / {
+                          proxy_pass http://localhost:8082;
+                          proxy_set_header Host $host;
+                          proxy_set_header X-Real-IP $remote_addr;
+                      }
+                  }
+                  EOF
+                - systemctl enable nginx
+                - systemctl restart nginx
+
+Outputs:
+  RepoDownloadDocumentName:
+    Description: SSM document name
+    Value: !Ref RepoDownloadDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-RepoDownloadSSMDoc'
+
+  ApplicationDeploymentDocumentName:
+    Description: SSM document name
+    Value: !Ref ApplicationDeploymentDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationDeploymentSSMDoc'
+
+  ConfigureDemoInfraSecretsDocumentName:
+    Description: SSM document name
+    Value: !Ref ConfigureDemoInfraSecretsDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-ConfigureDemoSecretsSSMDoc'
+
+  ConfigureManualInfraSecretsDocumentName:
+    Description: SSM document name
+    Value: !Ref ConfigureManualInfraSecretsDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-ConfigureManualSecretsSSMDoc'
+
+  ApplicationPostDeploymentDocumentName:
+    Description: SSM document name
+    Value: !Ref ApplicationPostDeploymentDocument
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationPostDeploymentSSMDoc'
+
+  CloudFrontDistributionDomain:
+    Condition: UseCloudFrontDistribution
+    Description: CloudFront distribution domain
+    Value: !GetAtt CloudFrontDistribution.DomainName

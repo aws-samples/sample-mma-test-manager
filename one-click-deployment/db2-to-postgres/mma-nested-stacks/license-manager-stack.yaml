@@ -1,0 +1,299 @@
+Description: License Manager self-managed licence configuration for RDS for Db2 CE
+
+# RDS for Db2 Community Edition is bring-your-own-licence, and RDS requires a
+# License Manager self-managed licence configuration whose RDS product filter
+# matches "Engine Edition = db2-ce". Matching RDS instances are associated
+# automatically - nothing attaches the configuration to the instance.
+#
+# WHY A CUSTOM RESOURCE: CloudFormation has no resource type for a self-managed
+# licence configuration. AWS::LicenseManager::License and ::Grant model licences
+# GRANTED to you (typically Marketplace-delivered), not the self-managed
+# configuration RDS looks for. So this is a Lambda-backed custom resource
+# wrapping license-manager:CreateLicenseConfiguration, following the same shape
+# as ssm-waiter-stack.yaml.
+#
+# IDEMPOTENCY / ADOPTION: License Manager permits only ONE licence configuration
+# per product filter value per account and region. Creating a second one filtered
+# on 'Engine Edition = db2-ce' fails with
+#   InvalidParameterValueException: Duplicate filter value for filter Engine Edition
+# no matter what name is requested. So on Create the function looks for ANY
+# existing db2-ce configuration and ADOPTS it; the LicenseConfigurationName is
+# used only when the region has none. On Delete it removes only a configuration
+# this stack actually created, never an adopted one, and never fails the delete.
+#
+# This is a hard service constraint, not an optimisation: matching by name
+# instead, so that each stack owned a configuration of its own, fails in any
+# account that already has a db2-ce configuration. RDS associates instances with
+# a configuration by product filter rather than by name, so an adopted one is
+# functionally identical.
+#
+# NOTE: the explanation above is deliberately in comments rather than in
+# Description - CloudFormation caps Description at 1024 characters, and an
+# over-long one fails with "Template format error: 'Description' length is
+# greater than 1024" at create time.
+
+Parameters:
+  StackPrefix:
+    Type: String
+
+  LicenseConfigurationName:
+    Type: String
+    Default: mma-db2-ce-license
+    Description: >-
+      Name used only when creating a new licence configuration. Ignored when a
+      db2-ce configuration already exists in the region: License Manager permits
+      one configuration per filter value, so the existing one is adopted.
+
+Resources:
+  LicenseManagerRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >-
+              License Manager Create/List/Delete LicenseConfiguration do not
+              support resource-level permissions: the ARN does not exist before
+              creation, and List is account-wide by definition.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LicenseManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Exactly the four calls the function makes. No tagging actions:
+              # the configuration is identified by its product filter, not tags.
+              - Effect: Allow
+                Action:
+                  - license-manager:CreateLicenseConfiguration
+                  - license-manager:ListLicenseConfigurations
+                  - license-manager:GetLicenseConfiguration
+                  - license-manager:DeleteLicenseConfiguration
+                Resource: '*'
+
+  LicenseManagerFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "CloudFormation custom resource only calls the License Manager API, no VPC access required"
+          - id: W92
+            reason: "CloudFormation custom resource with single invocation, reserved concurrency not required"
+      checkov:
+        skip:
+          - id: CKV_AWS_116
+            comment: "DLQ not required for CloudFormation custom resource"
+          - id: CKV_AWS_117
+            comment: "Lambda only calls AWS APIs, no VPC access required"
+    Properties:
+      FunctionName: !Sub '${StackPrefix}-db2-license-config'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LicenseManagerRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+          from botocore.exceptions import ClientError
+
+          lm = boto3.client('license-manager')
+
+          # RDS matches instances to a licence configuration through this filter.
+          # 'Engine Edition' / 'db2-ce' must be exact - RDS will not associate a
+          # db2-ce instance with a configuration filtered on anything else.
+          PRODUCT_INFORMATION = [{
+              'ResourceType': 'RDS',
+              'ProductInformationFilterList': [{
+                  'ProductInformationFilterName': 'Engine Edition',
+                  'ProductInformationFilterValue': ['db2-ce'],
+                  'ProductInformationFilterComparator': 'EQUALS',
+              }],
+          }]
+
+          # The PhysicalResourceId carries whether we created the configuration
+          # or adopted a pre-existing one, because a Delete event receives only
+          # the id - not the Data returned on Create. Getting this wrong would
+          # mean deleting a configuration another stack still depends on.
+          CREATED_PREFIX = 'created:'
+          ADOPTED_PREFIX = 'adopted:'
+
+
+          def find_any_db2ce():
+              """Return the ARN of ANY licence configuration filtered on RDS
+              db2-ce, or None. Paginated: an account may hold many.
+
+              Name is deliberately NOT part of the match. License Manager allows
+              only one configuration per product filter value per account and
+              region, so whichever db2-ce configuration exists is the one that
+              must be used - creating a second under a different name is
+              rejected with "Duplicate filter value for filter Engine Edition".
+              RDS associates instances by filter, not by name, so an adopted
+              configuration is functionally identical."""
+              paginator = lm.get_paginator('list_license_configurations')
+              for page in paginator.paginate():
+                  for config in page.get('LicenseConfigurations', []):
+                      for info in config.get('ProductInformationList', []):
+                          if info.get('ResourceType') != 'RDS':
+                              continue
+                          for f in info.get('ProductInformationFilterList', []):
+                              values = f.get('ProductInformationFilterValue') or []
+                              if 'db2-ce' in values:
+                                  return config['LicenseConfigurationArn']
+              return None
+
+
+          def handler(event, context):
+              request_type = event['RequestType']
+              print(f"RequestType: {request_type}")
+
+              try:
+                  if request_type == 'Delete':
+                      physical_id = event.get('PhysicalResourceId', '')
+                      if physical_id.startswith(CREATED_PREFIX):
+                          arn = physical_id[len(CREATED_PREFIX):]
+                          print(f"Deleting licence configuration created by this stack: {arn}")
+                          # License Manager reports usage ASYNCHRONOUSLY: it still
+                          # counts a Db2 instance for some minutes after RDS has
+                          # finished deleting it, and DeleteLicenseConfiguration
+                          # then fails with
+                          #   InvalidParameterValueException: ... has non-zero usage
+                          # DependsOn already orders DemoInfraStack's teardown
+                          # before this one, so the instance is gone by now - only
+                          # the usage counter lags. Retry until it clears.
+                          deleted = False
+                          delay = 15
+                          deadline = time.monotonic() + 210
+                          while True:
+                              try:
+                                  lm.delete_license_configuration(LicenseConfigurationArn=arn)
+                                  print("Deleted.")
+                                  deleted = True
+                                  break
+                              except ClientError as e:
+                                  msg = str(e)
+                                  transient = 'non-zero usage' in msg
+                                  if not transient or time.monotonic() + delay > deadline:
+                                      # Never block a stack delete on this. A licence
+                                      # configuration left behind is harmless and free;
+                                      # a stack stuck in DELETE_FAILED is not.
+                                      print(f"WARNING: delete failed, continuing: {e}")
+                                      if transient:
+                                          print("Usage did not clear in time. Remove it manually with:")
+                                          print(f"  aws license-manager delete-license-configuration "
+                                                f"--license-configuration-arn {arn}")
+                                      break
+                                  print(f"Still reporting usage; retrying in {delay}s...")
+                                  time.sleep(delay)
+                          if not deleted:
+                              print("Licence configuration was NOT deleted.")
+                      elif physical_id.startswith(ADOPTED_PREFIX):
+                          print("Configuration was pre-existing (adopted); leaving it in place.")
+                      else:
+                          print(f"Nothing to delete for PhysicalResourceId={physical_id!r}")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {},
+                                       physicalResourceId=event.get('PhysicalResourceId'))
+                      return
+
+                  # Create and Update are handled identically: converge on "a
+                  # db2-ce licence configuration exists in this region".
+                  #
+                  # ADOPTION IS MANDATORY, NOT AN OPTIMISATION. License Manager
+                  # permits only ONE configuration per product filter value per
+                  # account and region: creating a second with
+                  # 'Engine Edition = db2-ce' fails with
+                  #   InvalidParameterValueException: Duplicate filter value for
+                  #   filter Engine Edition
+                  # regardless of the name requested. So if any db2-ce
+                  # configuration already exists - whatever it is called, and
+                  # whoever created it - it must be reused.
+                  #
+                  # Consequence: the Name below applies only when the region has
+                  # no db2-ce configuration yet. To have this stack own a
+                  # configuration by that name, delete the pre-existing one first;
+                  # RDS associates instances by filter, not by name, so an adopted
+                  # configuration works identically.
+                  name = event['ResourceProperties'].get('Name', 'mma-db2-ce-license')
+
+                  existing = find_any_db2ce()
+                  if existing:
+                      print(f"Adopting existing db2-ce licence configuration: {existing}")
+                      print("License Manager allows only one configuration per filter "
+                            f"value, so {name!r} is not created. Delete the existing "
+                            "configuration first if you want this stack to own it.")
+                      cfnresponse.send(
+                          event, context, cfnresponse.SUCCESS,
+                          {'LicenseConfigurationArn': existing, 'Created': 'false'},
+                          physicalResourceId=ADOPTED_PREFIX + existing)
+                      return
+
+                  print(f"Creating licence configuration {name!r} filtered on db2-ce...")
+                  try:
+                      response = lm.create_license_configuration(
+                          Name=name,
+                          Description='Self-managed BYOL configuration for Amazon RDS for Db2 Community Edition',
+                          LicenseCountingType='vCPU',
+                          ProductInformationList=PRODUCT_INFORMATION,
+                      )
+                      arn = response['LicenseConfigurationArn']
+                      print(f"Created: {arn}")
+                      cfnresponse.send(
+                          event, context, cfnresponse.SUCCESS,
+                          {'LicenseConfigurationArn': arn, 'Created': 'true'},
+                          physicalResourceId=CREATED_PREFIX + arn)
+                  except ClientError as e:
+                      code = e.response['Error']['Code']
+                      # Another stack created one between our check and our create,
+                      # or a db2-ce configuration exists that find_any_db2ce did not
+                      # see. InvalidParameterValueException covers the
+                      # "Duplicate filter value for filter Engine Edition" case,
+                      # which is License Manager enforcing one configuration per
+                      # filter value. Re-check and adopt rather than failing.
+                      if code in ('ResourceLimitExceededException', 'ConflictException',
+                                  'InvalidParameterValueException'):
+                          print(f"Create failed with {code}; re-checking for any db2-ce configuration...")
+                          existing = find_any_db2ce()
+                          if existing:
+                              print(f"Found one on retry, adopting: {existing}")
+                              cfnresponse.send(
+                                  event, context, cfnresponse.SUCCESS,
+                                  {'LicenseConfigurationArn': existing, 'Created': 'false'},
+                                  physicalResourceId=ADOPTED_PREFIX + existing)
+                              return
+                      raise
+
+              except Exception as e:
+                  print(f"ERROR: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED,
+                                   {'Error': str(e)},
+                                   physicalResourceId=event.get('PhysicalResourceId', 'failed'))
+
+  Db2LicenseConfiguration:
+    Type: Custom::Db2LicenseConfiguration
+    Properties:
+      ServiceToken: !GetAtt LicenseManagerFunction.Arn
+      Name: !Ref LicenseConfigurationName
+
+Outputs:
+  LicenseConfigurationArn:
+    Description: ARN of the db2-ce licence configuration (created or adopted)
+    Value: !GetAtt Db2LicenseConfiguration.LicenseConfigurationArn
+    Export:
+      Name: !Sub '${AWS::StackName}-Db2LicenseConfigurationArn'
+
+  LicenseConfigurationCreated:
+    Description: >-
+      'true' if this stack created the configuration, 'false' if it adopted one
+      that already existed in the region.
+    Value: !GetAtt Db2LicenseConfiguration.Created
