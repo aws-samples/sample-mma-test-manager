@@ -28,7 +28,8 @@ Model Context Protocol (MCP) servers that enable AI-assisted database operations
 1. **postgres-client-mcp** - PostgreSQL database operations
 2. **sqlserver-client-mcp** - SQL Server database operations  
 3. **oracle-client-mcp** - Oracle database operations
-3. **sybase-client-mcp** - Sybase ASE database operations
+4. **sybase-client-mcp** - Sybase ASE database operations
+5. **db2-luw-client-mcp** - IBM Db2 LUW database operations
 
 All servers use the **stdio protocol** for stable communication with Kiro CLI.
 
@@ -49,6 +50,10 @@ One-click deployment solutions for different migration scenarios:
 - Main stack: `mma-apps-main-stack.yaml`
 - Nested stacks: `mma-nested-stacks/` (network, compute, database, demo-infrastructure, application-setup)
 - Deployment scripts: `deploy-mma-apps.sh`, `deploy-with-demo-infra.sh`, `deploy-with-demo-infra_cloudfront.sh`
+
+There is no one-click deployment for Sybase ASE or Db2 LUW. For Db2, the Db2 to Aurora PostgreSQL
+workshop provisions the environment with its own CloudFormation templates; see
+[db2-luw-client-mcp/README.md](db2-luw-client-mcp/README.md) for manual setup.
 
 ## Quick Start
 

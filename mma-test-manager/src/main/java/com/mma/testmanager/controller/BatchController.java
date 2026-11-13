@@ -146,7 +146,9 @@ public class BatchController {
 
         // Filter by code objects for test operations
         List<String> codeTypes = List.of("PROCEDURE", "FUNCTION", "VIEW", "TRIGGER", "SQL_SCALAR_FUNCTION",
-            "SQL_STORED_PROCEDURE", "SQL_INLINE_FUNCTION", "SQL_TABLE_VALUED_FUNCTION");
+            "SQL_STORED_PROCEDURE", "SQL_INLINE_FUNCTION", "SQL_TABLE_VALUED_FUNCTION",
+            // Db2 (see Db2CommonService.DB2_CODE_TYPES)
+            "TABLE_FUNCTION", "SOURCED_FUNCTION");
 
         boolean codeOnly = operation.startsWith("GENERATE_") || operation.startsWith("RUN_") ||
                            operation.equals("CONVERT_TESTS") || operation.equals("RESET_COMPARISON") ||
@@ -172,6 +174,7 @@ public class BatchController {
             case "postgres", "postgresql" -> "PostgreSQL";
             case "sqlserver" -> "SQL Server";
             case "sybase" -> "Sybase ASE";
+            case "db2" -> "Db2 LUW";
             case "mysql" -> "MySQL";
             default -> engine.toUpperCase();
         };

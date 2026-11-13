@@ -67,6 +67,16 @@
             <artifactId>mssql-jdbc</artifactId>
             <version>13.4.0.jre11</version>
         </dependency>
+        <!--
+            IBM Data Server Driver for JDBC and SQLJ (JCC) for Db2 LUW sources.
+            Published on Maven Central, so unlike the Sybase jconn42 driver it needs
+            no manual install. Keep this version aligned with db2-luw-client-mcp.
+        -->
+        <dependency>
+            <groupId>com.ibm.db2</groupId>
+            <artifactId>jcc</artifactId>
+            <version>11.5.9.0</version>
+        </dependency>
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>
@@ -137,8 +147,19 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
-                    <source>21</source>
-                    <target>21</target>
+                    <release>${java.version}</release>
+                    <!-- Lombok must be declared as an annotation processor here.
+                         Overriding the compiler plugin configuration discards the
+                         Spring Boot parent's annotationProcessorPaths, so without
+                         this Lombok never runs and every @Slf4j log field and
+                         @Data getter/setter fails to resolve. -->
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
                 </configuration>
             </plugin>
             <plugin>
