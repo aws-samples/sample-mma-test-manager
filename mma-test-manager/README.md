@@ -4,7 +4,7 @@ Spring Boot application for managing database migration testing with AI-powered 
 
 ## Features
 
-- **Multi-Engine Support**: Oracle, SQL Server → PostgreSQL
+- **Multi-Engine Support**: Oracle, SQL Server, Sybase ASE and Db2 LUW → PostgreSQL
 - **S3 Integration**: Load DMS Schema Conversion data into PostgreSQL repository
 - **Three Test Types**:
   - Comparison Test: Compare source vs target execution results
@@ -31,7 +31,7 @@ Edit `mma-test-manager/application-secretsmanager.properties`:
 mma.repo.type=secretsmanager
 mma.repo.secret=arn:aws:secretsmanager:region:account:secret:mma-repo
 
-# Source database (Oracle/SQL Server/MySQL)
+# Source database (Oracle/SQL Server/Sybase ASE/Db2 LUW)
 mma.sourcedb.connection.type=secretsmanager
 mma.sourcedb.connection.secret=arn:aws:secretsmanager:region:account:secret:source-admin
 mma.sourcedb.test.type=secretsmanager

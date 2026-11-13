@@ -14,6 +14,7 @@ SERVERS=(
     "postgres-client-mcp"
     "sqlserver-client-mcp"
     "oracle-client-mcp"
+    "db2-luw-client-mcp"
     "mma-test-manager"
 )
 

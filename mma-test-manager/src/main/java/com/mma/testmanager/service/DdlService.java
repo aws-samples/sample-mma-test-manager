@@ -24,6 +24,7 @@ public class DdlService {
     private final PostgresCommonService postgresqlService;
     private final SQLServerCommonService sqlServerService;
     private final SybaseCommonService sybaseService;
+    private final Db2CommonService db2Service;
 
     @Transactional
     public void retrieveSourceDdlFromDb(Long objectId) {
@@ -70,6 +71,8 @@ public class DdlService {
             return sqlServerService.extractSourceDdl(objectId);
         } else if ("sybase".equalsIgnoreCase(sourceEngine)) {
             return sybaseService.extractSourceDdl(objectId);
+        } else if ("db2".equalsIgnoreCase(sourceEngine)) {
+            return db2Service.extractSourceDdl(objectId);
         }
         
         throw new UnsupportedOperationException("Source database engine not supported: " + sourceEngine);
@@ -191,7 +194,8 @@ public class DdlService {
         // Generate DROP statement based on object type (without CASCADE to prevent unintended drops)
         return switch (objectType.toUpperCase()) {
             case "PROCEDURE", "SQL_STORED_PROCEDURE" -> "DROP PROCEDURE IF EXISTS " + fullName;
-            case "FUNCTION", "SQL_SCALAR_FUNCTION", "SQL_INLINE_FUNCTION", "SQL_TABLE_VALUED_FUNCTION" -> 
+            case "FUNCTION", "SQL_SCALAR_FUNCTION", "SQL_INLINE_FUNCTION", "SQL_TABLE_VALUED_FUNCTION",
+                 "TABLE_FUNCTION", "SOURCED_FUNCTION" -> 
                 "DROP FUNCTION IF EXISTS " + fullName;
             case "VIEW" -> "DROP VIEW IF EXISTS " + fullName;
             case "TRIGGER" -> "DROP TRIGGER IF EXISTS " + name + " ON " + schema + ".<table_name>"; // Note: needs table name
@@ -265,6 +269,7 @@ public class DdlService {
             case "postgres", "postgresql" -> "PostgreSQL";
             case "sqlserver" -> "SQL Server";
             case "mysql" -> "MySQL";
+            case "db2" -> "Db2 LUW";
             default -> dbEngine.substring(0, 1).toUpperCase() + dbEngine.substring(1);
         };
     }
