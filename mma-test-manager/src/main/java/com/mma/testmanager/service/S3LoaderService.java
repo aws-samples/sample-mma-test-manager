@@ -27,6 +27,7 @@ public class S3LoaderService {
     private final OracleCommonService oracleService;
     private final SQLServerCommonService sqlServerService;
     private final SybaseCommonService sybaseService;
+    private final Db2CommonService db2Service;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, String> progressMap = new ConcurrentHashMap<>();
     
@@ -115,6 +116,20 @@ public class S3LoaderService {
                     if (contentArray.isArray() && contentArray.size() > 0) {
                         JsonNode item = contentArray.get(0);
                         String metaType = item.path("meta-type").asText().toUpperCase();
+
+                        // DMS SC marks folder nodes explicitly: "type" is "category" or
+                        // "category-group" (with "sql": null and a "childrenCount"). Folders can
+                        // carry the same meta-type as their children (e.g. SQL_SCALAR_FUNCTION
+                        // "Scalar Functions"), so the meta-type lists below cannot catch them all.
+                        // A real object always carries its DDL in "sql", so require it to be
+                        // empty as well — a real object can never be dropped by this rule.
+                        String nodeType = item.path("type").asText("");
+                        boolean noSql = item.path("sql").isNull() || item.path("sql").asText("").isBlank();
+                        if (nodeType.toLowerCase().startsWith("category") && noSql) {
+                            log.info("Skipping DMS SC folder node: type={} meta-type={} name='{}'",
+                                nodeType, metaType, item.path("name").asText(""));
+                            continue;
+                        }
                         
                         // Skip metadata/folder object types based on source database engine
                         if ("oracle".equalsIgnoreCase(sourceEngine) && oracleService.isOracleMetadataType(metaType)) {
@@ -126,6 +141,9 @@ public class S3LoaderService {
                         if ("sybase".equalsIgnoreCase(sourceEngine) && sybaseService.isSybaseMetadataType(metaType)) {
                             continue;
                         }
+                        if ("db2".equalsIgnoreCase(sourceEngine) && db2Service.isDb2MetadataType(metaType)) {
+                            continue;
+                        }
                         
                         JsonNode locator = item.path("locator");
                         String schema = locator.path("schema-name").asText();
@@ -135,6 +153,16 @@ public class S3LoaderService {
                         if (!metaType.isEmpty() && !name.isEmpty() && !sourceId.isEmpty()) {
                             // Skip Sybase system catalog objects
                             if ("sybase".equalsIgnoreCase(sourceEngine) && sybaseService.isSybaseSystemObject(name)) {
+                                continue;
+                            }
+                            // Skip Db2 system catalog objects. Db2 identifies these by the
+                            // owning schema (SYSCAT, SYSIBM, ...) rather than a name prefix.
+                            if ("db2".equalsIgnoreCase(sourceEngine) && db2Service.isDb2SystemObject(schema)) {
+                                continue;
+                            }
+                            // Skip Db2 category folders that share their children's meta-type
+                            if ("db2".equalsIgnoreCase(sourceEngine) && db2Service.isDb2FolderNode(metaType, name)) {
+                                log.info("Skipping Db2 category folder node: {} '{}' (schema {})", metaType, name, schema);
                                 continue;
                             }
                             // Use sourceId as the unique key to support overloading

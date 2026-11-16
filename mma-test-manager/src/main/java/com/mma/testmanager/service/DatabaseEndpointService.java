@@ -138,7 +138,11 @@ public class DatabaseEndpointService {
             case "MYSQL", "AURORA_MYSQL" -> "mysql";
             case "MSSQL" -> "sqlserver";
             case "SYBASE_ASE", "SYBASE" -> "sybase";
-            default -> vendorName.toLowerCase();
+            case "DB2", "DB2_LUW", "IBMDB2LUW", "DB2LUW" -> "db2";
+            // Any other spelling of IBM Db2 LUW ("DB2 LUW", "IBM_DB2", "DB2_FOR_LUW", ...) must
+            // also map to "db2": every Db2-specific filter (folder nodes, system schemas,
+            // routine meta-types) is keyed on that value.
+            default -> vendorName.toUpperCase().contains("DB2") ? "db2" : vendorName.toLowerCase();
         };
     }
 }

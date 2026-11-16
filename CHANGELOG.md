@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### Test Manager
+- **Db2 LUW source support** — IBM Db2 for Linux, UNIX and Windows can now be used as
+  a migration source database, including `Db2CommonService`, routing in the DDL,
+  Dependency, Comparison and connection services, S3 project loading with Db2
+  system-schema and folder-node filtering, the `TABLE_FUNCTION` and
+  `SOURCED_FUNCTION` object types, the IBM JCC JDBC driver (`com.ibm.db2:jcc`), a Db2
+  icon, and a `V4__db2_knowledge_base.sql` migration with Db2-to-PostgreSQL
+  conversion rules.
+- **DMS SC folder nodes** — S3 project loading skips Schema Conversion folder nodes
+  (`type` of `category`/`category-group` with no SQL) for every source engine.
+
+#### MCP Servers
+- **`db2-luw-client-mcp`** — New stdio MCP server (Spring AI 1.1.7) for Db2 LUW
+  database operations, with a serialized stdio transport for parallel tool calls,
+  transport tests, `TESTING.md`, a `Db2ScriptRunner` helper, Maven wrapper, and a
+  sample Kiro CLI agent (`docs/sample-db2-postgres-mma-agent-for-kiro-cli.json`).
+
+#### Build
+- `build-all.sh` now builds `db2-luw-client-mcp`.
+
 ## [1.2.0] - 2026-06-02
 
 ### Added

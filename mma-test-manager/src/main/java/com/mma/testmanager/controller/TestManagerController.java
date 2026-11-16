@@ -12,6 +12,7 @@ import com.mma.testmanager.service.S3LoaderService;
 import com.mma.testmanager.service.OracleCommonService;
 import com.mma.testmanager.service.SQLServerCommonService;
 import com.mma.testmanager.service.SybaseCommonService;
+import com.mma.testmanager.service.Db2CommonService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.info.BuildProperties;
@@ -40,6 +41,7 @@ public class TestManagerController {
     private final OracleCommonService oracleService;
     private final SQLServerCommonService sqlServerService;
     private final SybaseCommonService sybaseService;
+    private final Db2CommonService db2Service;
     private final com.mma.testmanager.repository.ProjectKnowledgeBaseRepository projectKnowledgeBaseRepository;
     private final com.mma.testmanager.repository.KnowledgeBaseRepository knowledgeBaseRepository;
     private final com.mma.testmanager.repository.TestCaseRepository testCaseRepository;
@@ -118,6 +120,10 @@ public class TestManagerController {
                 connectionString = String.format("isql -S %s:%s -U %s -D %s", host, port, username, dbname);
                 iconPath = "/images/sybase.png";
                 engineName = "Sybase ASE";
+            } else if ("db2".equalsIgnoreCase(engine)) {
+                connectionString = String.format("db2 connect to %s user %s (host %s:%s)", dbname, username, host, port);
+                iconPath = "/images/db2.png";
+                engineName = "Db2 LUW";
             } else {
                 connectionString = String.format("%s://%s:%s/%s (user: %s)", engine, host, port, dbname, username);
                 iconPath = "/images/convert.png";
@@ -216,6 +222,10 @@ public class TestManagerController {
                 codeTypes.add("SQL_SCALAR_FUNCTION");
             }
             
+            if ("db2".equalsIgnoreCase(sourceDbEngine)) {
+                codeTypes.addAll(Db2CommonService.DB2_CODE_TYPES);
+            }
+            
             objectTypes = codeTypes;
             excludeTypes = null;
         } else {
@@ -241,6 +251,11 @@ public class TestManagerController {
                 excludeList.add("SQL_SCALAR_FUNCTION");
             }
             
+            // Add Db2 code types
+            if ("db2".equalsIgnoreCase(sourceDbEngine)) {
+                excludeList.addAll(Db2CommonService.DB2_CODE_TYPES);
+            }
+            
             // Add metadata/folder types based on source engine
             if ("oracle".equalsIgnoreCase(sourceDbEngine)) {
                 excludeList.addAll(oracleService.getOracleMetadataTypes());
@@ -248,6 +263,8 @@ public class TestManagerController {
                 excludeList.addAll(sqlServerService.getSQLServerMetadataTypes());
             } else if ("sybase".equalsIgnoreCase(sourceDbEngine)) {
                 excludeList.addAll(sybaseService.getSybaseMetadataTypes());
+            } else if ("db2".equalsIgnoreCase(sourceDbEngine)) {
+                excludeList.addAll(db2Service.getDb2MetadataTypes());
             }
             
             excludeTypes = excludeList;
@@ -494,6 +511,7 @@ public class TestManagerController {
             objectType.equals("TABLE") || 
             objectType.equals("VIEW") || 
             objectType.equals("FUNCTION") || 
+            Db2CommonService.DB2_CODE_TYPES.contains(objectType) ||
             objectType.equals("PROCEDURE") ||
             objectType.equals("INDEX") ||
             objectType.equals("TRIGGER") ||
@@ -736,6 +754,7 @@ public class TestManagerController {
         if ("sqlserver".equalsIgnoreCase(engine)) return "SQL Server";
         if ("mysql".equalsIgnoreCase(engine)) return "MySQL";
         if ("sybase".equalsIgnoreCase(engine)) return "Sybase ASE";
+        if ("db2".equalsIgnoreCase(engine)) return "Db2 LUW";
         return engine.toUpperCase();
     }
     
@@ -746,6 +765,7 @@ public class TestManagerController {
         if ("sqlserver".equalsIgnoreCase(engine)) return "sqlserver";
         if ("mysql".equalsIgnoreCase(engine)) return "mysql";
         if ("sybase".equalsIgnoreCase(engine)) return "sybase";
+        if ("db2".equalsIgnoreCase(engine)) return "db2";
         return engine.toLowerCase();
     }
     

@@ -19,6 +19,7 @@ public class DependencyService {
     private final OracleCommonService oracleService;
     private final SQLServerCommonService sqlServerService;
     private final SybaseCommonService sybaseService;
+    private final Db2CommonService db2Service;
 
     public List<Dependency> getObjectDependencies(Long objectId) throws Exception {
         DatabaseObject obj = objectRepository.findById(objectId).orElseThrow();
@@ -31,6 +32,8 @@ public class DependencyService {
             return sqlServerService.getSourceDependencies(objectId);
         } else if ("SYBASE".equalsIgnoreCase(sourceEngine)) {
             return sybaseService.getSourceDependencies(objectId);
+        } else if ("DB2".equalsIgnoreCase(sourceEngine)) {
+            return db2Service.getSourceDependencies(objectId);
         }
         
         throw new UnsupportedOperationException("Source database engine not supported: " + sourceEngine);

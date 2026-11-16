@@ -308,6 +308,8 @@ public class ComparisonTestService {
             result = dbConnectionService.executeSqlServerTestWithTestUser(obj.getSourceSchemaName(), tc.getSourceSql());
         } else if ("sybase".equalsIgnoreCase(sourceEngine)) {
             result = dbConnectionService.executeSybaseTestWithTestUser(obj.getSourceSchemaName(), tc.getSourceSql());
+        } else if ("db2".equalsIgnoreCase(sourceEngine)) {
+            result = dbConnectionService.executeDb2TestWithTestUser(obj.getSourceSchemaName(), tc.getSourceSql());
         } else {
             throw new UnsupportedOperationException("Source engine not supported: " + sourceEngine);
         }

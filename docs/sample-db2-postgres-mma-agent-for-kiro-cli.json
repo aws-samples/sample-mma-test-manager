@@ -1,0 +1,66 @@
+{
+  "name": "mma-agent",
+  "description": "Agent with MMA MCP servers for Db2 LUW to Aurora PostgreSQL migration",
+  "prompt": null,
+  "mcpServers": {
+    "postgres-client-mcp": {
+      "type": "stdio",
+      "command": "java",
+      "args": [
+        "-jar",
+        "/workshop/MMA-Samples/postgres-client-mcp/target/postgresql-mcp-server-1.0.0.jar",
+        "--spring.config.location=/workshop/MMA-Samples/postgres-client-mcp/application-secretsmanager.properties"
+      ],
+      "timeout": 300000,
+      "disabled": false
+    },
+    "db2-luw-client-mcp": {
+      "type": "stdio",
+      "command": "java",
+      "args": [
+        "-jar",
+        "/workshop/MMA-Samples/db2-luw-client-mcp/target/db2-luw-mcp-server-1.0.0.jar",
+        "--spring.config.location=/workshop/MMA-Samples/db2-luw-client-mcp/application-secretsmanager.properties"
+      ],
+      "timeout": 300000,
+      "disabled": false
+    }
+  },
+  "tools": [
+    "read",
+    "write",
+    "shell",
+    "aws",
+    "report",
+    "introspect",
+    "knowledge",
+    "thinking",
+    "todo",
+    "delegate",
+    "@postgres-client-mcp",
+    "@db2-luw-client-mcp"
+  ],
+  "toolAliases": {},
+  "allowedTools": [
+    "read",
+    "write",
+    "shell",
+    "aws",
+    "report",
+    "introspect",
+    "knowledge",
+    "thinking",
+    "todo",
+    "delegate",
+    "@postgres-client-mcp",
+    "@db2-luw-client-mcp"
+  ],
+  "resources": [
+    "file://AGENTS.md",
+    "file://README.md"
+  ],
+  "hooks": {},
+  "toolsSettings": {},
+  "useLegacyMcpJson": true,
+  "model": "claude-opus-4.8"
+}
